@@ -42,5 +42,19 @@ int main(int argc, char *argv[]) {
         usage(argv[0]);
     }
 
+    fprintf(manager_logfile, "[INFO] NFS Manager started with config: workers=%d, port=%d, buffer=%d\n",
+            worker_limit, port_number, bufferSize);
+    fflush(manager_logfile);
+
+    sync_info_mem_store store;
+    store.head = NULL;
+    store.size = 0;
+
+    read_config_file(config_file, manager_logfile, &store);
+
+    free_sync_info_store(&store);
+    fclose(manager_logfile);
+    free(config_file);
+
     return 0;
 }
