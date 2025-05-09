@@ -34,12 +34,12 @@ int main(int argc, char *argv[]) {
                 bufferSize = atoi(optarg);
                 break;
             default:
-                usage(argv[0]);
+                usage_m(argv[0]);
         }
     }
 
     if (!manager_logfile || !config_file || worker_limit <= 0 || port_number <= 0 || bufferSize <= 0) {
-        usage(argv[0]);
+        usage_m(argv[0]);
     }
 
     fprintf(manager_logfile, "[INFO] NFS Manager started with config: workers=%d, port=%d, buffer=%d\n",

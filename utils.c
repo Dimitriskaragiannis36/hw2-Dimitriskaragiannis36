@@ -1,8 +1,14 @@
 #include "utils.h"
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <time.h>
 
-void usage(const char *prog_name) {
+
+void usage_m(const char *prog_name) {
     fprintf(stderr, "Usage: %s -l <manager_logfile> -c <config_file> -n <worker_limit> -p <port_number> -b <bufferSize>\n", prog_name);
     exit(EXIT_FAILURE);
 }
@@ -94,3 +100,68 @@ void free_sync_info_store(sync_info_mem_store *store) {
     store->size = 0;
 }
 
+void usage_c(const char *progname) {
+    fprintf(stderr, "Usage: %s -l <console-logfile> -h <host_IP> -p <host_port>\n", progname);
+    exit(EXIT_FAILURE);
+}
+
+int create_socket(const char *host_ip, int host_port) {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(host_port);
+    if (inet_pton(AF_INET, host_ip, &server_addr.sin_addr) <= 0) {
+        perror("inet_pton");
+        exit(EXIT_FAILURE);
+    }
+
+    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("connect");
+        exit(EXIT_FAILURE);
+    }
+
+    return sockfd;
+}
+
+void command_loop(int sockfd, FILE *logfile) {
+    char line[MAX_LINE];
+    while (1) {
+        printf("> ");
+        fflush(stdout);
+
+        if (!fgets(line, sizeof(line), stdin)) break;
+        line[strcspn(line, "\n")] = '\0';  
+
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        char timestamp[64];
+        strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
+        fprintf(logfile, "%s Command %s\n", timestamp, line);
+        fflush(logfile);
+
+        if (send(sockfd, line, strlen(line), 0) < 0) {
+            perror("send");
+            break;
+        }
+
+        char response[MAX_LINE];
+        int n = recv(sockfd, response, sizeof(response) - 1, 0);
+        if (n <= 0) {
+            perror("recv");
+            break;
+        }
+        response[n] = '\0';
+
+        printf("%s\n", response);
+        fprintf(logfile, "%s %s\n", timestamp, response);
+        fflush(logfile);
+
+        if (strncmp(line, "shutdown", 8) == 0) break;
+    }
+}
