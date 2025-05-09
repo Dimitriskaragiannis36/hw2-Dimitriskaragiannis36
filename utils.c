@@ -449,7 +449,31 @@ void handle_client(int client_fd) {
         closedir(dir);
     }
 
-    //αφήνω για την ώρα τα υπόλοιπα
+    else if (strncmp(buffer, "PULL ", 5) == 0) {
+        char *filepath = buffer + 5;
+        handle_pull(client_fd, filepath);
+    }
+
+    else if (strncmp(buffer, "PUSH ", 5) == 0) {
+        char filepath[1024];
+        int chunk_size;
+
+        char *after_cmd = buffer + 5;
+        char *first_space = strchr(after_cmd, ' ');
+        if (!first_space) return;
+        char *second_space = strchr(first_space + 1, ' ');
+        if (!second_space) return;
+
+        *second_space = '\0';  
+
+        strncpy(filepath, after_cmd, first_space - after_cmd);
+        filepath[first_space - after_cmd] = '\0';
+
+        chunk_size = atoi(first_space + 1);
+        char *data = second_space + 1;
+
+        handle_push(client_fd, filepath, chunk_size, data);
+    }
 }
 
 int connect_to_client(const char *ip, int port) {
@@ -518,5 +542,71 @@ int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_in
     return 0;
 }
 
+int handle_pull(int client_fd, const char *filepath) {
+    FILE *file = fopen(filepath, "rb");
+    if (!file) {
+        char msg[1024];
+        snprintf(msg, sizeof(msg), "-1 File not found or cannot open\n");
+        send(client_fd, msg, strlen(msg), 0);
+        return -1;
+    }
+
+    fseek(file, 0, SEEK_END);
+    long filesize = ftell(file);
+    rewind(file);
+
+    char *buffer = malloc(filesize);
+    if (!buffer) {
+        fclose(file);
+        char msg[] = "-1 Memory allocation failed\n";
+        send(client_fd, msg, strlen(msg), 0);
+        return -1;
+    }
+
+    fread(buffer, 1, filesize, file);
+    fclose(file);
+
+    char header[64];
+    int header_len = snprintf(header, sizeof(header), "%ld ", filesize);
+    send(client_fd, header, header_len, 0);
+    send(client_fd, buffer, filesize, 0);
+
+    free(buffer);
+    return 0;
+}
+
+int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data) {
+    static FILE *file = NULL;
+
+    if (chunk_size == -1) {
+        if (file) fclose(file);  
+        file = fopen(filepath, "wb");
+        if (!file) {
+            perror("fopen");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (chunk_size == 0) {
+        if (file) {
+            fclose(file);
+            file = NULL;
+        }
+        return 0;
+    }
+
+    if (!file) {
+        file = fopen(filepath, "ab");
+        if (!file) {
+            perror("fopen append");
+            return -1;
+        }
+    }
+
+    fwrite(data, 1, chunk_size, file);
+    fflush(file);
+    return 0;
+}
 
 
