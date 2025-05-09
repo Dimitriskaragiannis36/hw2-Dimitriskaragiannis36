@@ -50,6 +50,25 @@ int main(int argc, char *argv[]) {
     store.head = NULL;
     store.size = 0;
 
+    sync_info_mem *curr = store.head;
+    while (curr) {
+        int sockfd = connect_to_client(curr->source_host, curr->source_port);
+        if (sockfd < 0) {
+            fprintf(manager_logfile, "Failed to connect to %s:%d\n", curr->source_host, curr->source_port);
+            fflush(manager_logfile);
+            curr = curr->next;
+            continue;
+        }
+
+        if (send_list_command(sockfd, curr->source_dir, manager_logfile, curr) < 0) {
+            fprintf(manager_logfile, "Failed to send LIST command to %s:%d\n", curr->source_host, curr->source_port);
+            fflush(manager_logfile);
+        }
+
+        close(sockfd);
+        curr = curr->next;
+    }
+
     read_config_file(config_file, manager_logfile, &store);
 
     int server_sock = create_server_socket(port_number);

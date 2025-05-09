@@ -452,3 +452,71 @@ void handle_client(int client_fd) {
     //αφήνω για την ώρα τα υπόλοιπα
 }
 
+int connect_to_client(const char *ip, int port) {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
+        return -1;
+    }
+
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, ip, &serv_addr.sin_addr) <= 0) {
+        perror("inet_pton");
+        close(sockfd);
+        return -1;
+    }
+
+    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        perror("connect");
+        close(sockfd);
+        return -1;
+    }
+
+    return sockfd;
+}
+
+int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_info_mem *entry) {
+    char command[1024];
+    snprintf(command, sizeof(command), "LIST %s", source_dir);
+
+    if (send(sockfd, command, strlen(command), 0) < 0) {
+        perror("send");
+        return -1;
+    }
+
+    FILE *sock_stream = fdopen(sockfd, "r");
+    if (!sock_stream) {
+        perror("fdopen");
+        return -1;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), sock_stream)) {
+        line[strcspn(line, "\n")] = '\0';
+        if (strcmp(line, ".") == 0) break;
+
+    fprintf(logfile,
+        "[%s] Added file: %s/%s@%s:%d -> %s/%s@%s:%d\n",
+        entry->source_dir,    
+        entry->source_dir,        
+        line,                    
+        entry->source_host,       
+        entry->source_port,       
+        entry->target_dir,        
+        line,                     
+        entry->target_host,       
+        entry->target_port       
+    );
+        fflush(logfile);
+    }
+
+    fclose(sock_stream);
+    return 0;
+}
+
+
+

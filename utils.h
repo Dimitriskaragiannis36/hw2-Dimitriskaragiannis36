@@ -43,6 +43,9 @@ sync_info_mem* find_sync_info(sync_info_mem_store *store, const char *source_dir
 void free_sync_info_store(sync_info_mem_store *store);
 int create_server_socket(int port);
 int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store);
+int connect_to_client(const char *ip, int port);
+int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_info_mem *entry);
+
 
 
 
@@ -53,4 +56,5 @@ void command_loop(int sockfd, FILE *logfile);
 
 int start_server_socket(int port);
 void handle_client(int client_fd);
+
 #endif // UTILS_H

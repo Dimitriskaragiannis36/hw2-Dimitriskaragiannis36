@@ -5,7 +5,7 @@ CC = gcc
 CFLAGS = -Wall -g
 
 #make βασικός στόχος
-all: nfs_manager nfs_console 
+all: nfs_manager nfs_console nfs_client
 
 #manager με link στο utils
 nfs_manager: nfs_manager.c utils.c
@@ -14,6 +14,10 @@ nfs_manager: nfs_manager.c utils.c
 #console με link στο utils
 nfs_console: nfs_console.c utils.c
 	$(CC) $(CFLAGS) -o nfs_console nfs_console.c utils.c
+
+#client με link στο utils
+nfs_client: nfs_client.c utils.c
+	$(CC) $(CFLAGS) -o nfs_client nfs_client.c utils.c
 
 #εκτέλεση manager με στανταρ ορίσματα + -n 5 (worker_limit)
 run: nfs_manager
@@ -25,4 +29,4 @@ console: nfs_console
 
 #καθαρισμός όλων των binaries και log_files
 clean:
-	rm -f nfs_manager nfs_console *.o manager_logfile console_logfile
+	rm -f nfs_manager nfs_console nfs_client *.o manager_logfile console_logfile
