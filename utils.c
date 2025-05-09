@@ -100,6 +100,70 @@ void free_sync_info_store(sync_info_mem_store *store) {
     store->size = 0;
 }
 
+int create_server_socket(int port) {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    int optval = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        perror("setsockopt");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(sockfd, 5) < 0) {
+        perror("listen");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    return sockfd;
+}
+
+
+void handle_client_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
+    char buffer[MAX_LINE_LENGTH];
+    int bytes = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+    if (bytes <= 0) {
+        perror("recv");
+        close(client_sock);
+        return;
+    }
+    buffer[bytes] = '\0';
+
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char timestamp[64];
+    strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
+
+    fprintf(logfile, "%s Command received: %s\n", timestamp, buffer);
+    fflush(logfile);
+
+    printf("%s\n", buffer);  
+
+   
+    send(client_sock, "Command received\n", 17, 0);
+    close(client_sock);
+
+    //το αφήνω για την ώρα
+}
+
+
 void usage_c(const char *progname) {
     fprintf(stderr, "Usage: %s -l <console-logfile> -h <host_IP> -p <host_port>\n", progname);
     exit(EXIT_FAILURE);

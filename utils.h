@@ -15,7 +15,7 @@
 #define MAX_DIR_LENGTH 256
 #define MAX_LINE 1024
 
-typedef struct {
+typedef struct sync_info_mem {
     char source_host[MAX_HOST_LENGTH];
     int source_port;
     char source_dir[MAX_DIR_LENGTH];
@@ -41,6 +41,10 @@ void read_config_file(const char *filename, FILE *log_fp, sync_info_mem_store *s
 void add_sync_info(sync_info_mem_store *store, sync_info_mem *info);
 sync_info_mem* find_sync_info(sync_info_mem_store *store, const char *source_dir);
 void free_sync_info_store(sync_info_mem_store *store);
+int create_server_socket(int port);
+void handle_client_command(int client_sock, FILE *logfile, sync_info_mem_store *store);
+
+
 
 void usage_c(const char *progname);
 int create_socket(const char *host_ip, int host_port); 

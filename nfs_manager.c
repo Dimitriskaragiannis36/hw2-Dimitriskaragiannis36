@@ -3,6 +3,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <unistd.h>
 
 int main(int argc, char *argv[]) {
     FILE *manager_logfile = NULL;
@@ -51,6 +55,22 @@ int main(int argc, char *argv[]) {
     store.size = 0;
 
     read_config_file(config_file, manager_logfile, &store);
+
+    int server_sock = create_server_socket(port_number);
+    fprintf(manager_logfile, "[INFO] Listening on port %d...\n", port_number);
+    fflush(manager_logfile);
+
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &client_len);
+        if (client_sock < 0) {
+            perror("accept");
+            continue;
+        }
+
+        handle_client_command(client_sock, manager_logfile, &store);
+    }
 
     free_sync_info_store(&store);
     fclose(manager_logfile);
