@@ -69,7 +69,10 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        handle_client_command(client_sock, manager_logfile, &store);
+        int shutdown_requested = handle_client_command(client_sock, manager_logfile, &store);
+        if (shutdown_requested) {
+            break;
+        }
     }
 
     free_sync_info_store(&store);

@@ -1,18 +1,28 @@
+#ο compiler
 CC = gcc
-CFLAGS = -Wall -Wextra -g
 
-OBJS = utils.o
+#οι σημαίες για τα warnings, debugs
+CFLAGS = -Wall -g
 
-all: nfs_manager nfs_console
+#make βασικός στόχος
+all: nfs_manager nfs_console 
 
-nfs_manager: nfs_manager.o $(OBJS)
-	$(CC) $(CFLAGS) -o nfs_manager nfs_manager.o $(OBJS)
+#manager με link στο utils
+nfs_manager: nfs_manager.c utils.c
+	$(CC) $(CFLAGS) -o nfs_manager nfs_manager.c utils.c
 
-nfs_console: nfs_console.o $(OBJS)
-	$(CC) $(CFLAGS) -o nfs_console nfs_console.o $(OBJS)
+#console με link στο utils
+nfs_console: nfs_console.c utils.c
+	$(CC) $(CFLAGS) -o nfs_console nfs_console.c utils.c
 
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+#εκτέλεση manager με στανταρ ορίσματα + -n 5 (worker_limit)
+run: nfs_manager
+	./nfs_manager -l manager_logfile -c config_file -n 5 -p 5000 -b 1024 
 
+#εκτέλεση console με στανταρ όρισμα
+console: nfs_console
+	./nfs_console -l console_logfile -h 127.0.0.1 -p 5000
+
+#καθαρισμός όλων των binaries και log_files
 clean:
-	rm -f *.o manager console
+	rm -f nfs_manager nfs_console *.o manager_logfile console_logfile

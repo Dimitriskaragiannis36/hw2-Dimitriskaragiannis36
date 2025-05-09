@@ -135,33 +135,46 @@ int create_server_socket(int port) {
     return sockfd;
 }
 
-
-void handle_client_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
+int handle_client_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
     char buffer[MAX_LINE_LENGTH];
-    int bytes = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
-    if (bytes <= 0) {
-        perror("recv");
-        close(client_sock);
-        return;
+
+    while (1) {
+        int bytes = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+        if (bytes <= 0) {
+            if (bytes == 0) {
+                printf("Client disconnected.\n");
+            } else {
+                perror("recv");
+            }
+            break;
+        }
+
+        buffer[bytes] = '\0';
+
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        char timestamp[64];
+        strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
+
+        fprintf(logfile, "%s Command received: %s\n", timestamp, buffer);
+        fflush(logfile);
+
+        printf("%s %s\n", timestamp, buffer);
+
+        char response[MAX_LINE_LENGTH];
+        snprintf(response, sizeof(response), "%s Command processed: %.900s", timestamp, buffer);
+        send(client_sock, response, strlen(response), 0);
+
+        if (strncmp(buffer, "shutdown", 8) == 0) {
+            close(client_sock);
+            return 1;  // signal shutdown
+        }
     }
-    buffer[bytes] = '\0';
 
-    time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
-    char timestamp[64];
-    strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
-
-    fprintf(logfile, "%s Command received: %s\n", timestamp, buffer);
-    fflush(logfile);
-
-    printf("%s\n", buffer);  
-
-   
-    send(client_sock, "Command received\n", 17, 0);
     close(client_sock);
-
-    //το αφήνω για την ώρα
+    return 0;
 }
+
 
 
 void usage_c(const char *progname) {
