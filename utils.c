@@ -61,7 +61,13 @@ void read_config_file(const char *filename, FILE *log_fp, sync_info_mem_store *s
         info->error_count = 0;
         info->last_sync_time = 0;
 
-        fprintf(log_fp, "[CONFIG] %s@%s:%d -> %s@%s:%d\n",
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        char timestamp[64];
+        strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
+
+        fprintf(log_fp, "%s Added file: %s@%s:%d -> %s@%s:%d\n",
+                timestamp,
                 info->source_dir, info->source_host, info->source_port,
                 info->target_dir, info->target_host, info->target_port);
 
@@ -135,7 +141,7 @@ int create_server_socket(int port) {
     return sockfd;
 }
 
-int handle_client_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
+int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
     char buffer[MAX_LINE_LENGTH];
 
     while (1) {
@@ -143,6 +149,7 @@ int handle_client_command(int client_sock, FILE *logfile, sync_info_mem_store *s
         if (bytes <= 0) {
             if (bytes == 0) {
                 printf("Client disconnected.\n");
+                return 1;
             } else {
                 perror("recv");
             }
@@ -155,19 +162,13 @@ int handle_client_command(int client_sock, FILE *logfile, sync_info_mem_store *s
         struct tm *tm_info = localtime(&now);
         char timestamp[64];
         strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
-
-        fprintf(logfile, "%s Command received: %s\n", timestamp, buffer);
         fflush(logfile);
 
         printf("%s %s\n", timestamp, buffer);
 
-        char response[MAX_LINE_LENGTH];
-        snprintf(response, sizeof(response), "%s Command processed: %.900s", timestamp, buffer);
-        send(client_sock, response, strlen(response), 0);
-
         if (strncmp(buffer, "shutdown", 8) == 0) {
             close(client_sock);
-            return 1;  // signal shutdown
+            return 1;  
         }
     }
 
@@ -219,8 +220,20 @@ void command_loop(int sockfd, FILE *logfile) {
         struct tm *tm_info = localtime(&now);
         char timestamp[64];
         strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
-        fprintf(logfile, "%s Command %s\n", timestamp, line);
-        fflush(logfile);
+
+        if (strncmp(line, "add ", 4) == 0) {
+            char src[MAX_LINE], tgt[MAX_LINE];
+            if (sscanf(line + 4, "%s %s", src, tgt) == 2) {
+                fprintf(logfile, "%s Command add %s -> %s\n", timestamp, src, tgt);
+                fflush(logfile);
+            } else {
+                fprintf(logfile, "%s Invalid add command format: %s\n", timestamp, line);
+                fflush(logfile);
+            }
+        } else {
+            fprintf(logfile, "%s Command %s\n", timestamp, line);
+            fflush(logfile);
+        }
 
         if (send(sockfd, line, strlen(line), 0) < 0) {
             perror("send");
@@ -235,8 +248,12 @@ void command_loop(int sockfd, FILE *logfile) {
         }
         response[n] = '\0';
 
-        printf("%s\n", response);
-        fprintf(logfile, "%s %s\n", timestamp, response);
+        char full_output[MAX_LINE * 2];
+        snprintf(full_output, sizeof(full_output), "%s %s", timestamp, response);
+
+        printf("%s\n", full_output);
+
+        fprintf(logfile, "%s\n", full_output);
         fflush(logfile);
 
         if (strncmp(line, "shutdown", 8) == 0) break;

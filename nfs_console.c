@@ -17,7 +17,7 @@ int main(int argc, char *argv[]) {
     while ((opt = getopt(argc, argv, "l:h:p:")) != -1) {
         switch (opt) {
             case 'l':
-                logfile = fopen(optarg, "a");
+                logfile = fopen(optarg, "w");
                 if (!logfile) {
                     perror("fopen logfile");
                     exit(EXIT_FAILURE);
