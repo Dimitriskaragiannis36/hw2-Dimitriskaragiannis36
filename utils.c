@@ -6,7 +6,11 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <time.h>
+#include <fcntl.h>
+#include <dirent.h>
 
+#define MAX_LINE 1024
+#define FILE_CHUNK 4096
 
 void usage_m(const char *prog_name) {
     fprintf(stderr, "Usage: %s -l <manager_logfile> -c <config_file> -n <worker_limit> -p <port_number> -b <bufferSize>\n", prog_name);
@@ -387,5 +391,64 @@ void command_loop(int sockfd, FILE *logfile) {
             break;
     }
     close(sockfd);
+}
+
+
+
+
+int start_server_socket(int port) {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(sockfd, 5) < 0) {
+        perror("listen");
+        exit(EXIT_FAILURE);
+    }
+
+    return sockfd;
+}
+
+void handle_client(int client_fd) {
+    char buffer[MAX_LINE];
+    int bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+    if (bytes <= 0) return;
+
+    buffer[bytes] = '\0';
+
+    if (strncmp(buffer, "LIST ", 5) == 0) {
+        char *dir_path = buffer + 5;
+        DIR *dir = opendir(dir_path);
+        if (!dir) {
+            perror("opendir");
+            send(client_fd, ".\n", 2, 0);
+            return;
+        }
+
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_REG) {
+                send(client_fd, entry->d_name, strlen(entry->d_name), 0);
+                send(client_fd, "\n", 1, 0);
+            }
+        }
+        send(client_fd, ".\n", 2, 0);
+        closedir(dir);
+    }
+
+    //αφήνω για την ώρα τα υπόλοιπα
 }
 

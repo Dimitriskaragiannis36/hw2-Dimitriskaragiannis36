@@ -49,4 +49,8 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store);
 void usage_c(const char *progname);
 int create_socket(const char *host_ip, int host_port); 
 void command_loop(int sockfd, FILE *logfile);
+
+
+int start_server_socket(int port);
+void handle_client(int client_fd);
 #endif // UTILS_H
