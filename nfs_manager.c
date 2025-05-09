@@ -46,10 +46,6 @@ int main(int argc, char *argv[]) {
         usage_m(argv[0]);
     }
 
-    //fprintf(manager_logfile, "[INFO] NFS Manager started with config: workers=%d, port=%d, buffer=%d\n",
-      //      worker_limit, port_number, bufferSize);
-   // fflush(manager_logfile);
-
     sync_info_mem_store store;
     store.head = NULL;
     store.size = 0;
@@ -57,8 +53,6 @@ int main(int argc, char *argv[]) {
     read_config_file(config_file, manager_logfile, &store);
 
     int server_sock = create_server_socket(port_number);
-    //fprintf(manager_logfile, "[INFO] Listening on port %d...\n", port_number);
-    //fflush(manager_logfile);
 
     while (1) {
         struct sockaddr_in client_addr;

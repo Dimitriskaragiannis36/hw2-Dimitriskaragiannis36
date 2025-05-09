@@ -143,37 +143,86 @@ int create_server_socket(int port) {
 
 int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
     char buffer[MAX_LINE_LENGTH];
+    char response[MAX_LINE_LENGTH];
+    int shutdown_requested = 0;
 
-    while (1) {
-        int bytes = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
-        if (bytes <= 0) {
-            if (bytes == 0) {
-                printf("Client disconnected.\n");
-                return 1;
+    int bytes = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+    if (bytes <= 0) {
+        close(client_sock);
+        return 0;
+    }
+    buffer[bytes] = '\0';
+
+    // Timestamp
+    char timestamp[64];
+    time_t now = time(NULL);
+    strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", localtime(&now));
+
+    if (strncmp(buffer, "shutdown", 8) == 0) {
+        snprintf(response, sizeof(response),
+                 "%s Shutting down manager...\n"
+                 "%s Waiting for all active workers to finish.\n"
+                 "%s Processing remaining queued tasks.\n"
+                 "%s Manager shutdown complete\n",
+                 timestamp, timestamp, timestamp, timestamp);
+
+        shutdown_requested = 1;
+    }
+
+    else if (strncmp(buffer, "add ", 4) == 0) {
+        char src[MAX_LINE_LENGTH], dst[MAX_LINE_LENGTH];
+        if (sscanf(buffer + 4, "%1023s %1023s", src, dst) == 2) {
+            if (find_sync_info(store, src)) {
+                snprintf(response, sizeof(response), "%s Already in queue: %.900s\n", timestamp, src);
             } else {
-                perror("recv");
+                sync_info_mem *info = malloc(sizeof(sync_info_mem));
+                if (info) {
+                    memset(info, 0, sizeof(sync_info_mem));
+                    strncpy(info->source_dir, src, MAX_DIR_LENGTH - 1);
+                    strncpy(info->target_dir, dst, MAX_DIR_LENGTH - 1);
+                    info->active = 1;
+                    info->error_count = 0;
+                    info->last_sync_time = 0;
+                    add_sync_info(store, info);
+                    size_t max_response_length = sizeof(response) - strlen(timestamp) - 50;
+
+                    snprintf(response, max_response_length, "%s Added file: %.900s -> %.900s\n", timestamp, src, dst);
+                    fprintf(logfile, "%s Added file: %s -> %s\n", timestamp, src, dst);
+                    fflush(logfile);
+                } else {
+                    snprintf(response, sizeof(response), "%s Error allocating memory.\n", timestamp);
+                }
             }
-            break;
-        }
-
-        buffer[bytes] = '\0';
-
-        time_t now = time(NULL);
-        struct tm *tm_info = localtime(&now);
-        char timestamp[64];
-        strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
-        fflush(logfile);
-
-        printf("%s %s\n", timestamp, buffer);
-
-        if (strncmp(buffer, "shutdown", 8) == 0) {
-            close(client_sock);
-            return 1;  
+        } else {
+            snprintf(response, sizeof(response), "%s Invalid add command format.\n", timestamp);
         }
     }
 
+    else if (strncmp(buffer, "cancel ", 7) == 0) {
+        char src[MAX_LINE_LENGTH];
+        if (sscanf(buffer + 7, "%1023s", src) == 1) {
+            sync_info_mem *info = find_sync_info(store, src);
+            if (info) {
+                info->active = 0;
+                snprintf(response, sizeof(response), "%s Synchronization stopped for %.900s\n", timestamp, src);
+                fprintf(logfile, "%s Synchronization stopped for %s\n", timestamp, src);
+                fflush(logfile);
+            } else {
+                snprintf(response, sizeof(response), "%s Directory not being synchronized: %.900s\n", timestamp, src);
+            }
+        } else {
+            snprintf(response, sizeof(response), "%s Invalid cancel command format.\n", timestamp);
+        }
+    }
+
+    else {
+        snprintf(response, sizeof(response), "%s Unknown command.\n", timestamp);
+    }
+
+    // Always send response
+    send(client_sock, response, strlen(response), 0);
     close(client_sock);
-    return 0;
+    return shutdown_requested;
 }
 
 
@@ -207,55 +256,52 @@ int create_socket(const char *host_ip, int host_port) {
     return sockfd;
 }
 
-void command_loop(int sockfd, FILE *logfile) {
+void command_loop(int sockfd_unused, FILE *logfile) {
     char line[MAX_LINE];
+    char host_ip[64];
+    int host_port;
+
+    struct sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    getpeername(sockfd_unused, (struct sockaddr *)&addr, &len);
+    inet_ntop(AF_INET, &addr.sin_addr, host_ip, sizeof(host_ip));
+    host_port = ntohs(addr.sin_port);
+    close(sockfd_unused);  
     while (1) {
         printf("> ");
         fflush(stdout);
 
         if (!fgets(line, sizeof(line), stdin)) break;
-        line[strcspn(line, "\n")] = '\0';  
+        line[strcspn(line, "\n")] = '\0';
 
+        // Log input
         time_t now = time(NULL);
         struct tm *tm_info = localtime(&now);
         char timestamp[64];
         strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
 
-        if (strncmp(line, "add ", 4) == 0) {
-            char src[MAX_LINE], tgt[MAX_LINE];
-            if (sscanf(line + 4, "%s %s", src, tgt) == 2) {
-                fprintf(logfile, "%s Command add %s -> %s\n", timestamp, src, tgt);
-                fflush(logfile);
-            } else {
-                fprintf(logfile, "%s Invalid add command format: %s\n", timestamp, line);
-                fflush(logfile);
-            }
-        } else {
-            fprintf(logfile, "%s Command %s\n", timestamp, line);
-            fflush(logfile);
-        }
-
+        int sockfd = create_socket(host_ip, host_port);
         if (send(sockfd, line, strlen(line), 0) < 0) {
             perror("send");
+            close(sockfd);
             break;
         }
 
-        char response[MAX_LINE];
+        char response[MAX_LINE * 2];
         int n = recv(sockfd, response, sizeof(response) - 1, 0);
         if (n <= 0) {
             perror("recv");
+            close(sockfd);
             break;
         }
         response[n] = '\0';
+        close(sockfd);
 
-        char full_output[MAX_LINE * 2];
-        snprintf(full_output, sizeof(full_output), "%s %s", timestamp, response);
-
-        printf("%s\n", full_output);
-
-        fprintf(logfile, "%s\n", full_output);
+        fputs(response, stdout);         
+        fputs(response, logfile);       
         fflush(logfile);
 
-        if (strncmp(line, "shutdown", 8) == 0) break;
+        if (strncmp(line, "shutdown", 8) == 0)
+            break;
     }
 }
