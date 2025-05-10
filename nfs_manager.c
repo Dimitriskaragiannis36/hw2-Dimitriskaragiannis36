@@ -61,65 +61,12 @@ int main(int argc, char *argv[]) {
         pthread_create(&workers[i], NULL, worker_thread, (void*)&queue);
     }
 
-    sync_info_mem *curr = store.head;
-    while (curr) {
-        int sockfd = connect_to_client(curr->source_host, curr->source_port);
-        if (sockfd < 0) {
-            fprintf(manager_logfile, "Failed to connect to %s:%d\n", curr->source_host, curr->source_port);
-            fflush(manager_logfile);
-            curr = curr->next;
-            continue;
-        }
-
-        if (send_list_command(sockfd, curr->source_dir, manager_logfile, curr) < 0) {
-            fprintf(manager_logfile, "Failed to send LIST command to %s:%d\n", curr->source_host, curr->source_port);
-            fflush(manager_logfile);
-            close(sockfd);
-            curr = curr->next;
-            continue;
-        }
-
-        FILE *sock_stream = fdopen(sockfd, "r");
-        if (!sock_stream) {
-            perror("fdopen");
-            close(sockfd);
-            curr = curr->next;
-            continue;
-        }
-
-        char line[1024];
-        while (fgets(line, sizeof(line), sock_stream)) {
-            line[strcspn(line, "\n")] = '\0';
-            if (strcmp(line, ".") == 0) break;
-
-            char source_path[512], target_path[512];
-            snprintf(source_path, sizeof(source_path), "%s/", curr->source_dir);
-            strncat(source_path, line, sizeof(source_path) - strlen(source_path) - 1);
-
-            snprintf(target_path, sizeof(target_path), "%s/", curr->target_dir);
-            strncat(target_path, line, sizeof(target_path) - strlen(target_path) - 1);
-
-            sync_task task;
-            strncpy(task.source_host, curr->source_host, MAX_HOST_LENGTH);
-            task.source_port = curr->source_port;
-            strncpy(task.source_path, source_path, MAX_PATH_LENGTH);
-
-            strncpy(task.target_host, curr->target_host, MAX_HOST_LENGTH);
-            task.target_port = curr->target_port;
-            strncpy(task.target_path, target_path, MAX_PATH_LENGTH);
-
-            task.parent_entry = curr;
-
-            enqueue_task(&queue, &task);
-            fflush(manager_logfile);
-        }
-
-        fclose(sock_stream);
-        curr = curr->next;
-    }
+    send_list_and_enqueue_tasks(&store, &queue, manager_logfile);
 
     int server_sock = create_server_socket(port_number);
-
+    fprintf(stderr, "Listening on port %d...\n", port_number);
+    fflush(stderr);
+    
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);

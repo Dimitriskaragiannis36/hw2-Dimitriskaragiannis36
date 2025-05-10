@@ -78,6 +78,8 @@ void init_task_queue(task_queue *q, int capacity);
 void destroy_task_queue(task_queue *q);
 void enqueue_task(task_queue *q, sync_task *task);
 void dequeue_task(task_queue *q, sync_task *task_out);
+void send_list_and_enqueue_tasks(sync_info_mem_store *store, task_queue *queue, FILE *logfile);
+
 
 void usage_c(const char *progname);
 int create_socket(const char *host_ip, int host_port); 

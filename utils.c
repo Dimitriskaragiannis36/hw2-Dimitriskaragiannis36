@@ -498,7 +498,6 @@ void *worker_thread(void *arg) {
         int file_size = 0;
 
         if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size) == 0) {
-            // Κλείδωμα του mutex πριν την εγγραφή στο log
             pthread_mutex_lock(&log_mutex);
             fprintf(global_log_fp, "[%s] Pulled file: %s (%d bytes)\n",
                     task.parent_entry->source_dir, task.source_path, file_size);
@@ -530,6 +529,94 @@ void *worker_thread(void *arg) {
 
     return NULL;
 }
+
+
+void send_list_and_enqueue_tasks(sync_info_mem_store *store, task_queue *queue, FILE *logfile) {
+    sync_info_mem *curr = store->head;
+    while (curr) {
+        int sockfd = connect_to_client(curr->source_host, curr->source_port);
+        if (sockfd < 0) {
+            fprintf(logfile, "Failed to connect to %s:%d\n", curr->source_host, curr->source_port);
+            fflush(logfile);
+            curr = curr->next;
+            continue;
+        }
+
+        if (send_list_command(sockfd, curr->source_dir, logfile, curr) < 0) {
+            fprintf(logfile, "Failed to send LIST command to %s:%d\n", curr->source_host, curr->source_port);
+            fflush(logfile);
+            close(sockfd);
+            curr = curr->next;
+            continue;
+        }
+
+        FILE *sock_stream = fdopen(sockfd, "r");
+        if (!sock_stream) {
+            perror("fdopen");
+            close(sockfd);
+            curr = curr->next;
+            continue;
+        }
+
+        char line[1024];
+        while (fgets(line, sizeof(line), sock_stream)) {
+            line[strcspn(line, "\n")] = '\0';
+            if (strcmp(line, ".") == 0) break;
+
+            size_t source_len = strlen(curr->source_dir);
+            size_t target_len = strlen(curr->target_dir);
+            size_t file_len = strlen(line);
+
+            if (source_len + 1 + file_len >= MAX_PATH_LENGTH ||
+                target_len + 1 + file_len >= MAX_PATH_LENGTH) {
+                fprintf(logfile, "Path too long, skipping: %s/%s or %s/%s\n",
+                        curr->source_dir, line, curr->target_dir, line);
+                fflush(logfile);
+                continue;
+            }
+
+            char source_path[MAX_PATH_LENGTH];
+            char target_path[MAX_PATH_LENGTH];
+
+            if (snprintf(source_path, MAX_PATH_LENGTH, "%s/%s", curr->source_dir, line) >= MAX_PATH_LENGTH) {
+                fprintf(logfile, "Truncated source_path: %s/%s\n", curr->source_dir, line);
+                fflush(logfile);
+                continue;
+            }
+
+            if (snprintf(target_path, MAX_PATH_LENGTH, "%s/%s", curr->target_dir, line) >= MAX_PATH_LENGTH) {
+                fprintf(logfile, "Truncated target_path: %s/%s\n", curr->target_dir, line);
+                fflush(logfile);
+                continue;
+            }
+            sync_task task;
+            strncpy(task.source_host, curr->source_host, MAX_HOST_LENGTH);
+            task.source_host[MAX_HOST_LENGTH - 1] = '\0';
+
+            task.source_port = curr->source_port;
+
+            strncpy(task.source_path, source_path, MAX_PATH_LENGTH);
+            task.source_path[MAX_PATH_LENGTH - 1] = '\0';
+
+            strncpy(task.target_host, curr->target_host, MAX_HOST_LENGTH);
+            task.target_host[MAX_HOST_LENGTH - 1] = '\0';
+
+            task.target_port = curr->target_port;
+
+            strncpy(task.target_path, target_path, MAX_PATH_LENGTH);
+            task.target_path[MAX_PATH_LENGTH - 1] = '\0';
+
+            task.parent_entry = curr;
+
+            enqueue_task(queue, &task);
+            fflush(logfile);
+        }
+
+        fclose(sock_stream);
+        curr = curr->next;
+    }
+}
+
 
 
 

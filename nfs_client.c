@@ -10,9 +10,18 @@
 #define MAX_LINE 1024
 
 int main(int argc, char *argv[]) {
-    int port = PORT;
-    if (argc == 2) {
-        port = atoi(argv[1]);
+     int port = PORT; 
+    int opt;
+
+    while ((opt = getopt(argc, argv, "p:")) != -1) {
+        switch (opt) {
+            case 'p':  
+                port = atoi(optarg);  
+                break;
+            default:
+                fprintf(stderr, "Usage: %s [-p port_number]\n", argv[0]);
+                exit(EXIT_FAILURE);
+        }
     }
 
     int server_fd = start_server_socket(port);
