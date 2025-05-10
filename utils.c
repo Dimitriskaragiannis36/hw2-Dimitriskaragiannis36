@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <pthread.h>
 #include <errno.h>
+#include <libgen.h>
 
 FILE *global_log_fp = NULL;
 pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -506,25 +507,28 @@ void *worker_thread(void *arg) {
         char *file_data = NULL;
         int file_size = 0;
 
-        time_t now = time(NULL);
-        struct tm *tm_info = localtime(&now);
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-
         pthread_t tid = pthread_self();
 
-        // PULL
+        char clean_source_path[MAX_DIR_LENGTH];
+        char clean_target_path[MAX_DIR_LENGTH];
+        strip_extension(task.source_path, clean_source_path, sizeof(clean_source_path));
+        strip_extension(task.target_path, clean_target_path, sizeof(clean_target_path));
+
         if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size) == 0) {
+            time_t now = time(NULL);
+            struct tm *tm_info = localtime(&now);
+            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
             pthread_mutex_lock(&log_mutex);
             fprintf(global_log_fp,
                     "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PULL] [SUCCESS] [%d bytes pulled]\n",
                     timestamp,
-                    task.source_path, task.source_host, task.source_port,
-                    task.target_path, task.target_host, task.target_port,
+                    clean_source_path, task.source_host, task.source_port,
+                    clean_target_path, task.target_host, task.target_port,
                     (unsigned long)tid, file_size);
             fflush(global_log_fp);
             pthread_mutex_unlock(&log_mutex);
 
-            // PUSH
             if (push_file(task.target_host, task.target_port, task.target_path, file_data, file_size) == 0) {
                 now = time(NULL);
                 tm_info = localtime(&now);
@@ -534,41 +538,56 @@ void *worker_thread(void *arg) {
                 fprintf(global_log_fp,
                         "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PUSH] [SUCCESS] [%d bytes pushed]\n",
                         timestamp,
-                        task.source_path, task.source_host, task.source_port,
-                        task.target_path, task.target_host, task.target_port,
+                        clean_source_path, task.source_host, task.source_port,
+                        clean_target_path, task.target_host, task.target_port,
                         (unsigned long)tid, file_size);
                 fflush(global_log_fp);
                 pthread_mutex_unlock(&log_mutex);
             } else {
+                int err = errno;
                 now = time(NULL);
                 tm_info = localtime(&now);
                 strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
 
                 pthread_mutex_lock(&log_mutex);
                 fprintf(global_log_fp,
-                        "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PUSH] [ERROR] [%s]\n",
+                        "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PUSH] [ERROR] [File: %s - %s]\n",
                         timestamp,
-                        task.source_path, task.source_host, task.source_port,
-                        task.target_path, task.target_host, task.target_port,
-                        (unsigned long)tid, strerror(errno));
+                        clean_source_path, task.source_host, task.source_port,
+                        clean_target_path, task.target_host, task.target_port,
+                        (unsigned long)tid, basename(task.target_path), strerror(err));
                 fflush(global_log_fp);
                 pthread_mutex_unlock(&log_mutex);
             }
             free(file_data);
         } else {
+            int pull_err = errno;
+            time_t now = time(NULL);
+            struct tm *tm_info = localtime(&now);
+            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
             pthread_mutex_lock(&log_mutex);
             fprintf(global_log_fp,
-                    "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PULL] [ERROR] [%s]\n",
-                    timestamp,
-                    task.source_path, task.source_host, task.source_port,
-                    task.target_path, task.target_host, task.target_port,
-                    (unsigned long)tid, strerror(errno));
+                "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PULL] [ERROR] [File: %s - %s]\n",
+                timestamp,
+                clean_source_path, task.source_host, task.source_port,
+                clean_target_path, task.target_host, task.target_port,
+                (unsigned long)tid, basename(task.source_path), strerror(pull_err));
             fflush(global_log_fp);
             pthread_mutex_unlock(&log_mutex);
         }
     }
 
     return NULL;
+}
+
+void strip_extension(const char *filename, char *buffer, size_t bufsize) {
+    strncpy(buffer, filename, bufsize - 1);
+    buffer[bufsize - 1] = '\0';
+    char *dot = strrchr(buffer, '.');
+    if (dot) {
+        *dot = '\0'; 
+    }
 }
 
 void send_list_and_enqueue_tasks(sync_info_mem_store *store, task_queue *queue, FILE *logfile) {
@@ -785,7 +804,6 @@ void handle_client(int client_fd) {
     else if (strncmp(buffer, "PULL ", 5) == 0) {
         char *filepath = buffer + 5;
         filepath[strcspn(filepath, "\n")] = '\0';
-        printf("[nfs_client] Received PULL for path: '%s'\n", filepath);
         handle_pull(client_fd, filepath);
     }
 

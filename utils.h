@@ -93,5 +93,6 @@ int handle_pull(int client_fd, const char *filepath);
 int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data);
 
 void* worker_thread(void *arg);
+void strip_extension(const char *filename, char *buffer, size_t bufsize);
 
 #endif // UTILS_H

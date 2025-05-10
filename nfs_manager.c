@@ -64,8 +64,6 @@ int main(int argc, char *argv[]) {
     send_list_and_enqueue_tasks(&store, &queue, manager_logfile);
 
     int server_sock = create_server_socket(port_number);
-    fprintf(stderr, "Listening on port %d...\n", port_number);
-    fflush(stderr);
     
     while (1) {
         struct sockaddr_in client_addr;
