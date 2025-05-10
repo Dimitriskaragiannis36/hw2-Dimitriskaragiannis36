@@ -8,8 +8,8 @@ CFLAGS = -Wall -g
 all: nfs_manager nfs_console nfs_client
 
 #manager με link στο utils
-nfs_manager: nfs_manager.c utils.c
-	$(CC) $(CFLAGS) -o nfs_manager nfs_manager.c utils.c
+nfs_manager: nfs_manager.c utils.c 
+	$(CC) $(CFLAGS) -o nfs_manager nfs_manager.c utils.c -lpthread
 
 #console με link στο utils
 nfs_console: nfs_console.c utils.c

@@ -8,6 +8,10 @@
 #include <time.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <pthread.h>
+
+FILE *global_log_fp = NULL;
+pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void usage_m(const char *prog_name) {
     fprintf(stderr, "Usage: %s -l <manager_logfile> -c <config_file> -n <worker_limit> -p <port_number> -b <bufferSize>\n", prog_name);
@@ -483,7 +487,6 @@ void dequeue_task(task_queue *q, sync_task *task_out) {
     pthread_mutex_unlock(&q->mutex);
 }
 
-
 void *worker_thread(void *arg) {
     task_queue *queue = (task_queue *)arg;
 
@@ -495,28 +498,38 @@ void *worker_thread(void *arg) {
         int file_size = 0;
 
         if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size) == 0) {
-            fprintf(task.parent_entry->log_fp, "[%s] Pulled file: %s (%d bytes)\n",
+            // Κλείδωμα του mutex πριν την εγγραφή στο log
+            pthread_mutex_lock(&log_mutex);
+            fprintf(global_log_fp, "[%s] Pulled file: %s (%d bytes)\n",
                     task.parent_entry->source_dir, task.source_path, file_size);
+            fflush(global_log_fp);
+            pthread_mutex_unlock(&log_mutex);
 
             if (push_file(task.target_host, task.target_port, task.target_path, file_data, file_size) == 0) {
-                fprintf(task.parent_entry->log_fp, "[%s] Pushed file: %s\n",
+                pthread_mutex_lock(&log_mutex);
+                fprintf(global_log_fp, "[%s] Pushed file: %s\n",
                         task.parent_entry->target_dir, task.target_path);
+                fflush(global_log_fp);
+                pthread_mutex_unlock(&log_mutex);
             } else {
-                fprintf(task.parent_entry->log_fp, "[%s] Failed to push: %s\n",
+                pthread_mutex_lock(&log_mutex);
+                fprintf(global_log_fp, "[%s] Failed to push: %s\n",
                         task.parent_entry->target_dir, task.target_path);
+                fflush(global_log_fp);
+                pthread_mutex_unlock(&log_mutex);
             }
             free(file_data);
         } else {
-            fprintf(task.parent_entry->log_fp, "[%s] Failed to pull: %s\n",
+            pthread_mutex_lock(&log_mutex);
+            fprintf(global_log_fp, "[%s] Failed to pull: %s\n",
                     task.parent_entry->source_dir, task.source_path);
+            fflush(global_log_fp);
+            pthread_mutex_unlock(&log_mutex);
         }
-
-        fflush(task.parent_entry->log_fp);
     }
 
     return NULL;
 }
-
 
 
 

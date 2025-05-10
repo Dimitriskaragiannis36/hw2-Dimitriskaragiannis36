@@ -15,6 +15,9 @@
 #define MAX_DIR_LENGTH 256
 #define MAX_PATH_LENGTH 512
 
+extern FILE *global_log_fp;
+extern pthread_mutex_t log_mutex;
+
 typedef struct sync_info_mem {
     char source_host[MAX_HOST_LENGTH];
     int source_port;

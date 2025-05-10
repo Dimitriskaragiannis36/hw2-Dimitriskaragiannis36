@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <pthread.h>
 
 int main(int argc, char *argv[]) {
     FILE *manager_logfile = NULL;
@@ -23,6 +24,7 @@ int main(int argc, char *argv[]) {
                     perror("fopen log");
                     exit(EXIT_FAILURE);
                 }
+                global_log_fp = manager_logfile; 
                 break;
             case 'c':
                 config_file = strdup(optarg);
