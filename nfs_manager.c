@@ -6,7 +6,6 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <unistd.h>
 
 int main(int argc, char *argv[]) {
     FILE *manager_logfile = NULL;
@@ -50,6 +49,8 @@ int main(int argc, char *argv[]) {
     store.head = NULL;
     store.size = 0;
 
+    read_config_file(config_file, manager_logfile, &store);
+
     sync_info_mem *curr = store.head;
     while (curr) {
         int sockfd = connect_to_client(curr->source_host, curr->source_port);
@@ -63,13 +64,51 @@ int main(int argc, char *argv[]) {
         if (send_list_command(sockfd, curr->source_dir, manager_logfile, curr) < 0) {
             fprintf(manager_logfile, "Failed to send LIST command to %s:%d\n", curr->source_host, curr->source_port);
             fflush(manager_logfile);
+            close(sockfd);
+            curr = curr->next;
+            continue;
         }
 
-        close(sockfd);
+        FILE *sock_stream = fdopen(sockfd, "r");
+        if (!sock_stream) {
+            perror("fdopen");
+            close(sockfd);
+            curr = curr->next;
+            continue;
+        }
+
+        char line[1024];
+        while (fgets(line, sizeof(line), sock_stream)) {
+            line[strcspn(line, "\n")] = '\0';
+            if (strcmp(line, ".") == 0) break;
+
+            char source_path[512], target_path[512];
+            snprintf(source_path, sizeof(source_path), "%s/", curr->source_dir);
+            strncat(source_path, line, sizeof(source_path) - strlen(source_path) - 1);
+
+            snprintf(target_path, sizeof(target_path), "%s/", curr->target_dir);
+            strncat(target_path, line, sizeof(target_path) - strlen(target_path) - 1);
+
+            char *file_data = NULL;
+            int file_size = 0;
+
+            if (pull_file(curr->source_host, curr->source_port, source_path, &file_data, &file_size) == 0) {
+                fprintf(manager_logfile, "[%s] Pulled file: %s (%d bytes)\n", curr->source_dir, source_path, file_size);
+                if (push_file(curr->target_host, curr->target_port, target_path, file_data, file_size) == 0) {
+                    fprintf(manager_logfile, "[%s] Pushed file: %s\n", curr->target_dir, target_path);
+                } else {
+                    fprintf(manager_logfile, "[%s] Failed to push: %s\n", curr->target_dir, target_path);
+                }
+                free(file_data);
+            } else {
+                fprintf(manager_logfile, "[%s] Failed to pull: %s\n", curr->source_dir, source_path);
+            }
+            fflush(manager_logfile);
+        }
+
+        fclose(sock_stream);
         curr = curr->next;
     }
-
-    read_config_file(config_file, manager_logfile, &store);
 
     int server_sock = create_server_socket(port_number);
 

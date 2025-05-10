@@ -9,9 +9,6 @@
 #include <fcntl.h>
 #include <dirent.h>
 
-#define MAX_LINE 1024
-#define FILE_CHUNK 4096
-
 void usage_m(const char *prog_name) {
     fprintf(stderr, "Usage: %s -l <manager_logfile> -c <config_file> -n <worker_limit> -p <port_number> -b <bufferSize>\n", prog_name);
     exit(EXIT_FAILURE);
@@ -298,7 +295,146 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
     return shutdown_requested;
 }
 
+int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_info_mem *entry) {
+    char command[1024];
+    snprintf(command, sizeof(command), "LIST %s", source_dir);
 
+    if (send(sockfd, command, strlen(command), 0) < 0) {
+        perror("send");
+        return -1;
+    }
+
+    FILE *sock_stream = fdopen(sockfd, "r");
+    if (!sock_stream) {
+        perror("fdopen");
+        return -1;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), sock_stream)) {
+        line[strcspn(line, "\n")] = '\0';
+        if (strcmp(line, ".") == 0) break;
+
+    fprintf(logfile,
+        "[%s] Added file: %s/%s@%s:%d -> %s/%s@%s:%d\n",
+        entry->source_dir,    
+        entry->source_dir,        
+        line,                    
+        entry->source_host,       
+        entry->source_port,       
+        entry->target_dir,        
+        line,                     
+        entry->target_host,       
+        entry->target_port       
+    );
+        fflush(logfile);
+    }
+
+    fclose(sock_stream);
+    return 0;
+}
+
+int pull_file(const char *host, int port, const char *filepath, char **out_data, int *out_size) {
+    int sockfd;
+    struct sockaddr_in serv_addr;
+    
+    *out_data = NULL;
+    *out_size = 0;
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) return -1;
+
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
+        close(sockfd);
+        return -1;
+    }
+
+    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        close(sockfd);
+        return -1;
+    }
+
+    dprintf(sockfd, "PULL %s\n", filepath);
+
+    int filesize;
+    if (recv(sockfd, &filesize, sizeof(int), 0) != sizeof(int)) {
+        close(sockfd);
+        return -1;
+    }
+
+    filesize = ntohl(filesize);
+    if (filesize <= 0) {
+        close(sockfd);
+        return -1;
+    }
+
+    char *data = malloc(filesize);
+    if (!data) {
+        close(sockfd);
+        return -1;
+    }
+
+    int total_received = 0;
+    while (total_received < filesize) {
+        int n = recv(sockfd, data + total_received, filesize - total_received, 0);
+        if (n <= 0) {
+            free(data);
+            close(sockfd);
+            return -1;
+        }
+        total_received += n;
+    }
+
+    *out_data = data;
+    *out_size = filesize;
+    close(sockfd);
+    return 0;
+}
+
+int push_file(const char *host, int port, const char *filepath, const char *data, int size) {
+    int sockfd;
+    struct sockaddr_in serv_addr;
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) return -1;
+
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
+        close(sockfd);
+        return -1;
+    }
+
+    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        close(sockfd);
+        return -1;
+    }
+
+    dprintf(sockfd, "PUSH %s\n", filepath);
+
+    int net_size = htonl(size);
+    if (send(sockfd, &net_size, sizeof(int), 0) != sizeof(int)) {
+        close(sockfd);
+        return -1;
+    }
+
+    int total_sent = 0;
+    while (total_sent < size) {
+        int n = send(sockfd, data + total_sent, size - total_sent, 0);
+        if (n <= 0) {
+            close(sockfd);
+            return -1;
+        }
+        total_sent += n;
+    }
+
+    close(sockfd);
+    return 0;
+}
 
 
 void usage_c(const char *progname) {
@@ -331,7 +467,7 @@ int create_socket(const char *host_ip, int host_port) {
 }
 
 void command_loop(int sockfd, FILE *logfile) {
-    char line[MAX_LINE];
+    char line[MAX_LINE_LENGTH];
   
     while (1) {
         printf("> ");
@@ -346,16 +482,16 @@ void command_loop(int sockfd, FILE *logfile) {
         strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
 
         if (strncmp(line, "add ", 4) == 0) {
-            char src[MAX_LINE], dst[MAX_LINE];
+            char src[MAX_LINE_LENGTH], dst[MAX_LINE_LENGTH];
             if (sscanf(line + 4, "%s %s", src, dst) == 2) {
                 fprintf(logfile, "%s Command add %s -> %s\n", timestamp, src, dst);
             } else {
                 fprintf(logfile, "%s Command add (invalid format)\n", timestamp);
             }
         } else if (strncmp(line, "cancel ", 7) == 0) {
-            char full_path[MAX_LINE];
+            char full_path[MAX_LINE_LENGTH];
             if (sscanf(line + 7, "%s", full_path) == 1) {
-                char display_path[MAX_LINE];
+                char display_path[MAX_LINE_LENGTH];
                 strncpy(display_path, full_path, sizeof(display_path));
                 char *at = strchr(display_path, '@');
                 if (at) {
@@ -378,7 +514,7 @@ void command_loop(int sockfd, FILE *logfile) {
             break;
         }
 
-        char response[MAX_LINE * 2];
+        char response[MAX_LINE_LENGTH * 2];
         int n = recv(sockfd, response, sizeof(response) - 1, 0);
         if (n <= 0) {
             perror("recv");
@@ -423,7 +559,7 @@ int start_server_socket(int port) {
 }
 
 void handle_client(int client_fd) {
-    char buffer[MAX_LINE];
+    char buffer[MAX_LINE_LENGTH];
     int bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
     if (bytes <= 0) return;
 
@@ -503,45 +639,6 @@ int connect_to_client(const char *ip, int port) {
     return sockfd;
 }
 
-int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_info_mem *entry) {
-    char command[1024];
-    snprintf(command, sizeof(command), "LIST %s", source_dir);
-
-    if (send(sockfd, command, strlen(command), 0) < 0) {
-        perror("send");
-        return -1;
-    }
-
-    FILE *sock_stream = fdopen(sockfd, "r");
-    if (!sock_stream) {
-        perror("fdopen");
-        return -1;
-    }
-
-    char line[1024];
-    while (fgets(line, sizeof(line), sock_stream)) {
-        line[strcspn(line, "\n")] = '\0';
-        if (strcmp(line, ".") == 0) break;
-
-    fprintf(logfile,
-        "[%s] Added file: %s/%s@%s:%d -> %s/%s@%s:%d\n",
-        entry->source_dir,    
-        entry->source_dir,        
-        line,                    
-        entry->source_host,       
-        entry->source_port,       
-        entry->target_dir,        
-        line,                     
-        entry->target_host,       
-        entry->target_port       
-    );
-        fflush(logfile);
-    }
-
-    fclose(sock_stream);
-    return 0;
-}
-
 int handle_pull(int client_fd, const char *filepath) {
     FILE *file = fopen(filepath, "rb");
     if (!file) {
@@ -576,37 +673,34 @@ int handle_pull(int client_fd, const char *filepath) {
 }
 
 int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data) {
-    static FILE *file = NULL;
+    FILE *file;
 
     if (chunk_size == -1) {
-        if (file) fclose(file);  
         file = fopen(filepath, "wb");
         if (!file) {
             perror("fopen");
             return -1;
         }
+        fclose(file); 
         return 0;
     }
 
     if (chunk_size == 0) {
-        if (file) {
-            fclose(file);
-            file = NULL;
-        }
-        return 0;
+        return 0; 
     }
 
+    file = fopen(filepath, "ab");
     if (!file) {
-        file = fopen(filepath, "ab");
-        if (!file) {
-            perror("fopen append");
-            return -1;
-        }
+        perror("fopen append");
+        return -1;
     }
 
     fwrite(data, 1, chunk_size, file);
     fflush(file);
+    fclose(file);
+
     return 0;
 }
+
 
 
