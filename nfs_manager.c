@@ -51,6 +51,14 @@ int main(int argc, char *argv[]) {
 
     read_config_file(config_file, manager_logfile, &store);
 
+    task_queue queue;
+    init_task_queue(&queue, 100);  
+
+    pthread_t workers[worker_limit];
+    for (int i = 0; i < worker_limit; ++i) {
+        pthread_create(&workers[i], NULL, worker_thread, (void*)&queue);
+    }
+
     sync_info_mem *curr = store.head;
     while (curr) {
         int sockfd = connect_to_client(curr->source_host, curr->source_port);
@@ -89,20 +97,18 @@ int main(int argc, char *argv[]) {
             snprintf(target_path, sizeof(target_path), "%s/", curr->target_dir);
             strncat(target_path, line, sizeof(target_path) - strlen(target_path) - 1);
 
-            char *file_data = NULL;
-            int file_size = 0;
+            sync_task task;
+            strncpy(task.source_host, curr->source_host, MAX_HOST_LENGTH);
+            task.source_port = curr->source_port;
+            strncpy(task.source_path, source_path, MAX_PATH_LENGTH);
 
-            if (pull_file(curr->source_host, curr->source_port, source_path, &file_data, &file_size) == 0) {
-                fprintf(manager_logfile, "[%s] Pulled file: %s (%d bytes)\n", curr->source_dir, source_path, file_size);
-                if (push_file(curr->target_host, curr->target_port, target_path, file_data, file_size) == 0) {
-                    fprintf(manager_logfile, "[%s] Pushed file: %s\n", curr->target_dir, target_path);
-                } else {
-                    fprintf(manager_logfile, "[%s] Failed to push: %s\n", curr->target_dir, target_path);
-                }
-                free(file_data);
-            } else {
-                fprintf(manager_logfile, "[%s] Failed to pull: %s\n", curr->source_dir, source_path);
-            }
+            strncpy(task.target_host, curr->target_host, MAX_HOST_LENGTH);
+            task.target_port = curr->target_port;
+            strncpy(task.target_path, target_path, MAX_PATH_LENGTH);
+
+            task.parent_entry = curr;
+
+            enqueue_task(&queue, &task);
             fflush(manager_logfile);
         }
 
@@ -126,6 +132,12 @@ int main(int argc, char *argv[]) {
             break;
         }
     }
+
+    for (int i = 0; i < worker_limit; ++i) {
+    pthread_cancel(workers[i]);  
+    pthread_join(workers[i], NULL);
+    }
+    destroy_task_queue(&queue);
 
     free_sync_info_store(&store);
     fclose(manager_logfile);

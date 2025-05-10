@@ -13,7 +13,7 @@
 #define MAX_LINE_LENGTH 1024
 #define MAX_HOST_LENGTH 64
 #define MAX_DIR_LENGTH 256
-#define MAX_LINE 1024
+#define MAX_PATH_LENGTH 512
 
 typedef struct sync_info_mem {
     char source_host[MAX_HOST_LENGTH];
@@ -36,6 +36,30 @@ typedef struct {
     int size;
 } sync_info_mem_store;
 
+typedef struct {
+    char source_host[MAX_HOST_LENGTH];
+    int source_port;
+    char source_path[MAX_PATH_LENGTH];
+
+    char target_host[MAX_HOST_LENGTH];
+    int target_port;
+    char target_path[MAX_PATH_LENGTH];
+
+    sync_info_mem *parent_entry;  
+} sync_task;
+
+typedef struct {
+    sync_task *tasks;      
+    int capacity;          
+    int count;              
+    int front;             
+    int rear;             
+
+    pthread_mutex_t mutex;
+    pthread_cond_t not_full;
+    pthread_cond_t not_empty;
+} task_queue;
+
 void usage_m(const char *prog_name);
 void read_config_file(const char *filename, FILE *log_fp, sync_info_mem_store *store);
 void add_sync_info(sync_info_mem_store *store, sync_info_mem *info);
@@ -47,7 +71,10 @@ int connect_to_client(const char *ip, int port);
 int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_info_mem *entry);
 int pull_file(const char *host, int port, const char *filepath, char **out_data, int *out_size);
 int push_file(const char *host, int port, const char *filepath, const char *data, int size);
-
+void init_task_queue(task_queue *q, int capacity);
+void destroy_task_queue(task_queue *q);
+void enqueue_task(task_queue *q, sync_task *task);
+void dequeue_task(task_queue *q, sync_task *task_out);
 
 void usage_c(const char *progname);
 int create_socket(const char *host_ip, int host_port); 
@@ -59,5 +86,6 @@ void handle_client(int client_fd);
 int handle_pull(int client_fd, const char *filepath);
 int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data);
 
+void* worker_thread(void *arg);
 
 #endif // UTILS_H

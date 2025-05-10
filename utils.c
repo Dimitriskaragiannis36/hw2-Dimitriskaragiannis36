@@ -436,6 +436,89 @@ int push_file(const char *host, int port, const char *filepath, const char *data
     return 0;
 }
 
+void init_task_queue(task_queue *q, int capacity) {
+    q->capacity = capacity;
+    q->count = 0;
+    q->front = 0;
+    q->rear = 0;
+    q->tasks = malloc(capacity * sizeof(sync_task));
+
+    pthread_mutex_init(&q->mutex, NULL);
+    pthread_cond_init(&q->not_full, NULL);
+    pthread_cond_init(&q->not_empty, NULL);
+}
+
+void destroy_task_queue(task_queue *q) {
+    free(q->tasks);
+    pthread_mutex_destroy(&q->mutex);
+    pthread_cond_destroy(&q->not_full);
+    pthread_cond_destroy(&q->not_empty);
+}
+
+void enqueue_task(task_queue *q, sync_task *task) {
+    pthread_mutex_lock(&q->mutex);
+    while (q->count == q->capacity) {
+        pthread_cond_wait(&q->not_full, &q->mutex);
+    }
+
+    q->tasks[q->rear] = *task;
+    q->rear = (q->rear + 1) % q->capacity;
+    q->count++;
+
+    pthread_cond_signal(&q->not_empty);
+    pthread_mutex_unlock(&q->mutex);
+}
+
+void dequeue_task(task_queue *q, sync_task *task_out) {
+    pthread_mutex_lock(&q->mutex);
+    while (q->count == 0) {
+        pthread_cond_wait(&q->not_empty, &q->mutex);
+    }
+
+    *task_out = q->tasks[q->front];
+    q->front = (q->front + 1) % q->capacity;
+    q->count--;
+
+    pthread_cond_signal(&q->not_full);
+    pthread_mutex_unlock(&q->mutex);
+}
+
+
+void *worker_thread(void *arg) {
+    task_queue *queue = (task_queue *)arg;
+
+    while (1) {
+        sync_task task;
+        dequeue_task(queue, &task); 
+
+        char *file_data = NULL;
+        int file_size = 0;
+
+        if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size) == 0) {
+            fprintf(task.parent_entry->log_fp, "[%s] Pulled file: %s (%d bytes)\n",
+                    task.parent_entry->source_dir, task.source_path, file_size);
+
+            if (push_file(task.target_host, task.target_port, task.target_path, file_data, file_size) == 0) {
+                fprintf(task.parent_entry->log_fp, "[%s] Pushed file: %s\n",
+                        task.parent_entry->target_dir, task.target_path);
+            } else {
+                fprintf(task.parent_entry->log_fp, "[%s] Failed to push: %s\n",
+                        task.parent_entry->target_dir, task.target_path);
+            }
+            free(file_data);
+        } else {
+            fprintf(task.parent_entry->log_fp, "[%s] Failed to pull: %s\n",
+                    task.parent_entry->source_dir, task.source_path);
+        }
+
+        fflush(task.parent_entry->log_fp);
+    }
+
+    return NULL;
+}
+
+
+
 
 void usage_c(const char *progname) {
     fprintf(stderr, "Usage: %s -l <console-logfile> -h <host_IP> -p <host_port>\n", progname);
