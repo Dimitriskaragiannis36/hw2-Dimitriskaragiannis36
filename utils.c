@@ -343,43 +343,68 @@ int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_in
 int pull_file(const char *host, int port, const char *filepath, char **out_data, int *out_size) {
     int sockfd;
     struct sockaddr_in serv_addr;
-    
+    int saved_errno;
+
     *out_data = NULL;
     *out_size = 0;
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) return -1;
+    if (sockfd < 0)
+        return -1;
 
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
     if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
+        saved_errno = errno;
         close(sockfd);
+        errno = saved_errno;
         return -1;
     }
 
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        saved_errno = errno;
         close(sockfd);
+        errno = saved_errno;
         return -1;
     }
 
-    dprintf(sockfd, "PULL %s\n", filepath);
-
-    int filesize;
-    if (recv(sockfd, &filesize, sizeof(int), 0) != sizeof(int)) {
+    if (dprintf(sockfd, "PULL %s\n", filepath) < 0) {
+        saved_errno = errno;
         close(sockfd);
+        errno = saved_errno;
         return -1;
     }
 
-    filesize = ntohl(filesize);
-    if (filesize <= 0) {
+    int net_status, net_filesize;
+    if (recv(sockfd, &net_status, sizeof(int), 0) != sizeof(int)) {
+        saved_errno = errno;
         close(sockfd);
+        errno = saved_errno;
+        return -1;
+    }
+
+    if (recv(sockfd, &net_filesize, sizeof(int), 0) != sizeof(int)) {
+        saved_errno = errno;
+        close(sockfd);
+        errno = saved_errno;
+        return -1;
+    }
+
+    int status_code = ntohl(net_status);
+    int filesize = ntohl(net_filesize);
+
+    if (status_code != 0 || filesize <= 0) {
+        close(sockfd);
+        errno = (status_code != 0) ? status_code : EIO;
         return -1;
     }
 
     char *data = malloc(filesize);
     if (!data) {
+        saved_errno = errno;
         close(sockfd);
+        errno = saved_errno;
         return -1;
     }
 
@@ -387,8 +412,10 @@ int pull_file(const char *host, int port, const char *filepath, char **out_data,
     while (total_received < filesize) {
         int n = recv(sockfd, data + total_received, filesize - total_received, 0);
         if (n <= 0) {
+            saved_errno = errno;
             free(data);
             close(sockfd);
+            errno = saved_errno;
             return -1;
         }
         total_received += n;
@@ -403,51 +430,66 @@ int pull_file(const char *host, int port, const char *filepath, char **out_data,
 int push_file(const char *host, int port, const char *filepath, const char *data, int size) {
     int sockfd;
     struct sockaddr_in serv_addr;
+    int saved_errno;
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) return -1;
+    if (sockfd < 0)
+        return -1;
 
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
     if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
+        saved_errno = errno;
         close(sockfd);
+        errno = saved_errno;
         return -1;
     }
 
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        saved_errno = errno;
         close(sockfd);
+        errno = saved_errno;
         return -1;
     }
 
-    char header[1024];
-    int header_len = snprintf(header, sizeof(header), "PUSH %s %d ", filepath, size);
-
-    char *packet = malloc(header_len + size);
-    if (!packet) {
+    if (dprintf(sockfd, "PUSH %s %d\n", filepath, size) < 0) {
+        saved_errno = errno;
         close(sockfd);
+        errno = saved_errno;
         return -1;
     }
-
-    memcpy(packet, header, header_len);
-    memcpy(packet + header_len, data, size);
 
     int total_sent = 0;
-    while (total_sent < header_len + size) {
-        int n = send(sockfd, packet + total_sent, header_len + size - total_sent, 0);
+    while (total_sent < size) {
+        int n = send(sockfd, data + total_sent, size - total_sent, 0);
         if (n <= 0) {
-            free(packet);
+            saved_errno = errno;
             close(sockfd);
+            errno = saved_errno;
             return -1;
         }
         total_sent += n;
     }
 
-    free(packet);
+    int net_status;
+    if (recv(sockfd, &net_status, sizeof(int), 0) != sizeof(int)) {
+        saved_errno = errno;
+        close(sockfd);
+        errno = saved_errno;
+        return -1;
+    }
+
     close(sockfd);
+
+    int status = ntohl(net_status);
+    if (status != 0) {
+        errno = status;
+        return -1;
+    }
+
     return 0;
 }
-
 
 void init_task_queue(task_queue *q, int capacity) {
     q->capacity = capacity;
@@ -878,8 +920,10 @@ int connect_to_client(const char *ip, int port) {
 int handle_pull(int client_fd, const char *filepath) {
     FILE *file = fopen(filepath, "rb");
     if (!file) {
-        int zero = htonl(0);
-        send(client_fd, &zero, sizeof(int), 0);
+        int status = htonl(errno);
+        int fsize = htonl(0);
+        send(client_fd, &status, sizeof(int), 0);
+        send(client_fd, &fsize, sizeof(int), 0);
         return -1;
     }
 
@@ -889,17 +933,21 @@ int handle_pull(int client_fd, const char *filepath) {
 
     char *buffer = malloc(filesize);
     if (!buffer) {
+        int status = htonl(ENOMEM);
+        int fsize = htonl(0);
         fclose(file);
-        int zero = htonl(0);
-        send(client_fd, &zero, sizeof(int), 0);
+        send(client_fd, &status, sizeof(int), 0);
+        send(client_fd, &fsize, sizeof(int), 0);
         return -1;
     }
 
     fread(buffer, 1, filesize, file);
     fclose(file);
 
-    int net_filesize = htonl((int)filesize);
-    send(client_fd, &net_filesize, sizeof(int), 0);
+    int status = htonl(0); 
+    int fsize = htonl((int)filesize);
+    send(client_fd, &status, sizeof(int), 0);
+    send(client_fd, &fsize, sizeof(int), 0);
     send(client_fd, buffer, filesize, 0);
 
     free(buffer);
@@ -908,38 +956,43 @@ int handle_pull(int client_fd, const char *filepath) {
 
 int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data) {
     FILE *file;
+    int err = 0;
 
     if (chunk_size == -1) {
         file = fopen(filepath, "wb");
         if (!file) {
-            perror("fopen");
-            return -1;
+            perror("fopen truncate");
+            err = errno;
+        } else {
+            fclose(file);
         }
-        fclose(file); 
-        return 0;
+
+        int status = htonl(err);
+        send(client_fd, &status, sizeof(int), 0);
+        return (err == 0) ? 0 : -1;
     }
 
     if (chunk_size == 0) {
-        return 0; 
+        int status = htonl(0);
+        send(client_fd, &status, sizeof(int), 0);
+        return 0;
     }
 
     file = fopen(filepath, "ab");
     if (!file) {
         perror("fopen append");
-        return -1;
-    }
-
-    size_t written = fwrite(data, 1, chunk_size, file);
-    if (written != (size_t)chunk_size) {
-        perror("fwrite");
+        err = errno;
+    } else {
+        size_t written = fwrite(data, 1, chunk_size, file);
+        if (written != (size_t)chunk_size) {
+            perror("fwrite");
+            err = errno;
+        }
+        fflush(file);
         fclose(file);
-        return -1;
     }
-    fflush(file);
-    fclose(file);
 
-    return 0;
+    int status = htonl(err);
+    send(client_fd, &status, sizeof(int), 0);
+    return (err == 0) ? 0 : -1;
 }
-
-
-
