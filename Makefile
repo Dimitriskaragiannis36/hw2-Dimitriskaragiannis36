@@ -17,7 +17,7 @@ nfs_console: nfs_console.c utils.c
 
 #client με link στο utils
 nfs_client: nfs_client.c utils.c
-	$(CC) $(CFLAGS) -o nfs_client nfs_client.c utils.c
+	$(CC) $(CFLAGS) -o nfs_client nfs_client.c utils.c -lpthread
 
 #εκτέλεση manager με στανταρ ορίσματα + -n 5 (worker_limit)
 run: nfs_manager

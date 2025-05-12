@@ -53,7 +53,7 @@ int main(int argc, char *argv[]) {
 
     read_config_file(config_file, manager_logfile, &store);
 
-    task_queue queue;
+    /*task_queue queue;
     init_task_queue(&queue, 100);  
 
     pthread_t workers[worker_limit];
@@ -61,7 +61,8 @@ int main(int argc, char *argv[]) {
         pthread_create(&workers[i], NULL, worker_thread, (void*)&queue);
     }
 
-    send_list_and_enqueue_tasks(&store, &queue, manager_logfile);
+    send_list_and_enqueue_tasks(&store, &queue, manager_logfile);*/
+    send_list_and_process_all(&store, manager_logfile);
 
     int server_sock = create_server_socket(port_number);
     
@@ -80,11 +81,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    for (int i = 0; i < worker_limit; ++i) {
+    /*for (int i = 0; i < worker_limit; ++i) {
     pthread_cancel(workers[i]);  
     pthread_join(workers[i], NULL);
     }
-    destroy_task_queue(&queue);
+    destroy_task_queue(&queue);*/
 
     free_sync_info_store(&store);
     fclose(manager_logfile);

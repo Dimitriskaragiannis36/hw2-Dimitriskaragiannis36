@@ -10,7 +10,6 @@
 #include <dirent.h>
 #include <pthread.h>
 #include <errno.h>
-#include <libgen.h>
 
 FILE *global_log_fp = NULL;
 pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -340,71 +339,74 @@ int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_in
     return 0;
 }
 
-int pull_file(const char *host, int port, const char *filepath, char **out_data, int *out_size) {
+int pull_file(const char *host, int port, const char *filepath,
+              char **out_data, int *out_size, int *out_errno) {
     int sockfd;
     struct sockaddr_in serv_addr;
-    int saved_errno;
 
     *out_data = NULL;
     *out_size = 0;
+    if (out_errno) *out_errno = 0;
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
+    if (sockfd < 0) {
+        if (out_errno) *out_errno = errno;
         return -1;
+    }
 
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
+
     if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
-        saved_errno = errno;
+        int err = errno;
         close(sockfd);
-        errno = saved_errno;
+        if (out_errno) *out_errno = err;
         return -1;
     }
 
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        saved_errno = errno;
+        int err = errno;
         close(sockfd);
-        errno = saved_errno;
+        if (out_errno) *out_errno = err;
         return -1;
     }
 
     if (dprintf(sockfd, "PULL %s\n", filepath) < 0) {
-        saved_errno = errno;
+        int err = errno;
         close(sockfd);
-        errno = saved_errno;
+        if (out_errno) *out_errno = err;
         return -1;
     }
 
-    int net_status, net_filesize;
-    if (recv(sockfd, &net_status, sizeof(int), 0) != sizeof(int)) {
-        saved_errno = errno;
+    int filesize_net;
+    if (recv(sockfd, &filesize_net, sizeof(int), 0) != sizeof(int)) {
+        int err = errno;
         close(sockfd);
-        errno = saved_errno;
+        if (out_errno) *out_errno = err;
         return -1;
     }
 
-    if (recv(sockfd, &net_filesize, sizeof(int), 0) != sizeof(int)) {
-        saved_errno = errno;
+    int raw = ntohl(filesize_net);
+    if (raw & 0x80000000) {
+        int err = raw & 0x7FFFFFFF;  
         close(sockfd);
-        errno = saved_errno;
+        if (out_errno) *out_errno = err;
         return -1;
     }
 
-    int status_code = ntohl(net_status);
-    int filesize = ntohl(net_filesize);
+    int filesize = raw;  
 
-    if (status_code != 0 || filesize <= 0) {
+    if (filesize <= 0) {
         close(sockfd);
-        errno = (status_code != 0) ? status_code : EIO;
+        if (out_errno) *out_errno = EIO;
         return -1;
     }
 
     char *data = malloc(filesize);
     if (!data) {
-        saved_errno = errno;
         close(sockfd);
-        errno = saved_errno;
+        if (out_errno) *out_errno = ENOMEM;
         return -1;
     }
 
@@ -412,10 +414,10 @@ int pull_file(const char *host, int port, const char *filepath, char **out_data,
     while (total_received < filesize) {
         int n = recv(sockfd, data + total_received, filesize - total_received, 0);
         if (n <= 0) {
-            saved_errno = errno;
+            int err = (n == 0) ? ECONNRESET : errno;
             free(data);
             close(sockfd);
-            errno = saved_errno;
+            if (out_errno) *out_errno = err;
             return -1;
         }
         total_received += n;
@@ -427,69 +429,91 @@ int pull_file(const char *host, int port, const char *filepath, char **out_data,
     return 0;
 }
 
-int push_file(const char *host, int port, const char *filepath, const char *data, int size) {
+
+int push_file(const char *host, int port, const char *filepath,
+              const char *data, int size, int *out_errno) {
     int sockfd;
     struct sockaddr_in serv_addr;
-    int saved_errno;
+
+    if (out_errno) *out_errno = 0;
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
+    if (sockfd < 0) {
+        if (out_errno) *out_errno = errno;
         return -1;
+    }
 
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
     if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
-        saved_errno = errno;
+        int err = errno;
         close(sockfd);
-        errno = saved_errno;
+        if (out_errno) *out_errno = err;
         return -1;
     }
 
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        saved_errno = errno;
+        int err = errno;
         close(sockfd);
-        errno = saved_errno;
+        if (out_errno) *out_errno = err;
         return -1;
     }
 
-    if (dprintf(sockfd, "PUSH %s %d\n", filepath, size) < 0) {
-        saved_errno = errno;
+    char header[1024];
+    int header_len = snprintf(header, sizeof(header), "PUSH %s %d ", filepath, size);
+    if (header_len < 0 || header_len >= (int)sizeof(header)) {
         close(sockfd);
-        errno = saved_errno;
+        if (out_errno) *out_errno = EINVAL;
         return -1;
     }
+
+    char *packet = malloc(header_len + size);
+    if (!packet) {
+        close(sockfd);
+        if (out_errno) *out_errno = ENOMEM;
+        return -1;
+    }
+
+    memcpy(packet, header, header_len);
+    memcpy(packet + header_len, data, size);
 
     int total_sent = 0;
-    while (total_sent < size) {
-        int n = send(sockfd, data + total_sent, size - total_sent, 0);
+    while (total_sent < header_len + size) {
+        int n = send(sockfd, packet + total_sent, header_len + size - total_sent, 0);
         if (n <= 0) {
-            saved_errno = errno;
+            int err = (n == 0) ? ECONNRESET : errno;
+            free(packet);
             close(sockfd);
-            errno = saved_errno;
+            if (out_errno) *out_errno = err;
             return -1;
         }
         total_sent += n;
     }
 
-    int net_status;
-    if (recv(sockfd, &net_status, sizeof(int), 0) != sizeof(int)) {
-        saved_errno = errno;
+    free(packet);
+
+    int result_net;
+    if (recv(sockfd, &result_net, sizeof(int), 0) != sizeof(int)) {
+        int err = errno;
         close(sockfd);
-        errno = saved_errno;
+        if (out_errno) *out_errno = err;
         return -1;
     }
 
     close(sockfd);
 
-    int status = ntohl(net_status);
-    if (status != 0) {
-        errno = status;
+    int result = ntohl(result_net);
+    if (result & 0x80000000) {
+        if (out_errno) *out_errno = result & 0x7FFFFFFF;
         return -1;
     }
 
     return 0;
 }
+
+
+
 
 void init_task_queue(task_queue *q, int capacity) {
     q->capacity = capacity;
@@ -538,7 +562,7 @@ void dequeue_task(task_queue *q, sync_task *task_out) {
     pthread_mutex_unlock(&q->mutex);
 }
 
-void *worker_thread(void *arg) {
+/*void *worker_thread(void *arg) {
     task_queue *queue = (task_queue *)arg;
     char timestamp[64];
 
@@ -549,28 +573,25 @@ void *worker_thread(void *arg) {
         char *file_data = NULL;
         int file_size = 0;
 
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
         pthread_t tid = pthread_self();
 
-        char clean_source_path[MAX_DIR_LENGTH];
-        char clean_target_path[MAX_DIR_LENGTH];
-        strip_extension(task.source_path, clean_source_path, sizeof(clean_source_path));
-        strip_extension(task.target_path, clean_target_path, sizeof(clean_target_path));
-
+        // PULL
         if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size) == 0) {
-            time_t now = time(NULL);
-            struct tm *tm_info = localtime(&now);
-            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-
             pthread_mutex_lock(&log_mutex);
             fprintf(global_log_fp,
                     "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PULL] [SUCCESS] [%d bytes pulled]\n",
                     timestamp,
-                    clean_source_path, task.source_host, task.source_port,
-                    clean_target_path, task.target_host, task.target_port,
+                    task.source_path, task.source_host, task.source_port,
+                    task.target_path, task.target_host, task.target_port,
                     (unsigned long)tid, file_size);
             fflush(global_log_fp);
             pthread_mutex_unlock(&log_mutex);
 
+            // PUSH
             if (push_file(task.target_host, task.target_port, task.target_path, file_data, file_size) == 0) {
                 now = time(NULL);
                 tm_info = localtime(&now);
@@ -580,57 +601,42 @@ void *worker_thread(void *arg) {
                 fprintf(global_log_fp,
                         "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PUSH] [SUCCESS] [%d bytes pushed]\n",
                         timestamp,
-                        clean_source_path, task.source_host, task.source_port,
-                        clean_target_path, task.target_host, task.target_port,
+                        task.source_path, task.source_host, task.source_port,
+                        task.target_path, task.target_host, task.target_port,
                         (unsigned long)tid, file_size);
                 fflush(global_log_fp);
                 pthread_mutex_unlock(&log_mutex);
             } else {
-                int err = errno;
                 now = time(NULL);
                 tm_info = localtime(&now);
                 strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
 
                 pthread_mutex_lock(&log_mutex);
                 fprintf(global_log_fp,
-                        "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PUSH] [ERROR] [File: %s - %s]\n",
+                        "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PUSH] [ERROR] [%s]\n",
                         timestamp,
-                        clean_source_path, task.source_host, task.source_port,
-                        clean_target_path, task.target_host, task.target_port,
-                        (unsigned long)tid, basename(task.target_path), strerror(err));
+                        task.source_path, task.source_host, task.source_port,
+                        task.target_path, task.target_host, task.target_port,
+                        (unsigned long)tid, strerror(errno));
                 fflush(global_log_fp);
                 pthread_mutex_unlock(&log_mutex);
             }
             free(file_data);
         } else {
-            int pull_err = errno;
-            time_t now = time(NULL);
-            struct tm *tm_info = localtime(&now);
-            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-
             pthread_mutex_lock(&log_mutex);
             fprintf(global_log_fp,
-                "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PULL] [ERROR] [File: %s - %s]\n",
-                timestamp,
-                clean_source_path, task.source_host, task.source_port,
-                clean_target_path, task.target_host, task.target_port,
-                (unsigned long)tid, basename(task.source_path), strerror(pull_err));
+                    "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PULL] [ERROR] [%s]\n",
+                    timestamp,
+                    task.source_path, task.source_host, task.source_port,
+                    task.target_path, task.target_host, task.target_port,
+                    (unsigned long)tid, strerror(errno));
             fflush(global_log_fp);
             pthread_mutex_unlock(&log_mutex);
         }
     }
 
     return NULL;
-}
-
-void strip_extension(const char *filename, char *buffer, size_t bufsize) {
-    strncpy(buffer, filename, bufsize - 1);
-    buffer[bufsize - 1] = '\0';
-    char *dot = strrchr(buffer, '.');
-    if (dot) {
-        *dot = '\0'; 
-    }
-}
+}*/
 
 void send_list_and_enqueue_tasks(sync_info_mem_store *store, task_queue *queue, FILE *logfile) {
     sync_info_mem *curr = store->head;
@@ -846,6 +852,7 @@ void handle_client(int client_fd) {
     else if (strncmp(buffer, "PULL ", 5) == 0) {
         char *filepath = buffer + 5;
         filepath[strcspn(filepath, "\n")] = '\0';
+        printf("[nfs_client] Received PULL for path: '%s'\n", filepath);
         handle_pull(client_fd, filepath);
     }
 
@@ -920,10 +927,10 @@ int connect_to_client(const char *ip, int port) {
 int handle_pull(int client_fd, const char *filepath) {
     FILE *file = fopen(filepath, "rb");
     if (!file) {
-        int status = htonl(errno);
-        int fsize = htonl(0);
-        send(client_fd, &status, sizeof(int), 0);
-        send(client_fd, &fsize, sizeof(int), 0);
+        int err = errno;
+        int net_err = htonl(0x80000000 | err);  
+        send(client_fd, &net_err, sizeof(int), 0);
+        perror("fopen (PULL)");
         return -1;
     }
 
@@ -933,66 +940,203 @@ int handle_pull(int client_fd, const char *filepath) {
 
     char *buffer = malloc(filesize);
     if (!buffer) {
-        int status = htonl(ENOMEM);
-        int fsize = htonl(0);
         fclose(file);
-        send(client_fd, &status, sizeof(int), 0);
-        send(client_fd, &fsize, sizeof(int), 0);
+        int net_err = htonl(0x80000000 | ENOMEM);
+        send(client_fd, &net_err, sizeof(int), 0);
         return -1;
     }
 
     fread(buffer, 1, filesize, file);
     fclose(file);
 
-    int status = htonl(0); 
-    int fsize = htonl((int)filesize);
-    send(client_fd, &status, sizeof(int), 0);
-    send(client_fd, &fsize, sizeof(int), 0);
+    int net_filesize = htonl((int)filesize);
+    send(client_fd, &net_filesize, sizeof(int), 0);
     send(client_fd, buffer, filesize, 0);
 
     free(buffer);
     return 0;
 }
 
+
 int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data) {
     FILE *file;
-    int err = 0;
 
     if (chunk_size == -1) {
         file = fopen(filepath, "wb");
         if (!file) {
-            perror("fopen truncate");
-            err = errno;
-        } else {
-            fclose(file);
+            int err = htonl(0x80000000 | errno);
+            send(client_fd, &err, sizeof(int), 0);
+            perror("fopen create");
+            return -1;
         }
+        fclose(file); 
 
-        int status = htonl(err);
-        send(client_fd, &status, sizeof(int), 0);
-        return (err == 0) ? 0 : -1;
+        int ok = htonl(0);  
+        send(client_fd, &ok, sizeof(int), 0);
+        return 0;
     }
 
     if (chunk_size == 0) {
-        int status = htonl(0);
-        send(client_fd, &status, sizeof(int), 0);
-        return 0;
+        int ok = htonl(0);  
+        send(client_fd, &ok, sizeof(int), 0);
+        return 0; 
     }
 
     file = fopen(filepath, "ab");
     if (!file) {
+        int err = htonl(0x80000000 | errno);
+        send(client_fd, &err, sizeof(int), 0);
         perror("fopen append");
-        err = errno;
-    } else {
-        size_t written = fwrite(data, 1, chunk_size, file);
-        if (written != (size_t)chunk_size) {
-            perror("fwrite");
-            err = errno;
-        }
-        fflush(file);
-        fclose(file);
+        return -1;
     }
 
-    int status = htonl(err);
-    send(client_fd, &status, sizeof(int), 0);
-    return (err == 0) ? 0 : -1;
+    size_t written = fwrite(data, 1, chunk_size, file);
+    if (written != (size_t)chunk_size) {
+        int err = htonl(0x80000000 | EIO);
+        send(client_fd, &err, sizeof(int), 0);
+        perror("fwrite");
+        fclose(file);
+        return -1;
+    }
+
+    fflush(file);
+    fclose(file);
+
+    int ok = htonl(0);  
+    send(client_fd, &ok, sizeof(int), 0);
+    return 0;
+}
+
+
+
+
+
+void process_task_serially(sync_task task, FILE *logfile) {
+    char *file_data = NULL;
+    int file_size = 0;
+
+    char timestamp[64];
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
+    pid_t pid = getpid();
+
+    int pull_errno = 0;
+    if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size, &pull_errno) == 0) {
+            fprintf(logfile,
+            "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PULL] [SUCCESS] [%d bytes pulled]\n",
+            timestamp,
+            task.source_path, task.source_host, task.source_port,
+            task.target_path, task.target_host, task.target_port,
+            pid, file_size
+        );
+        fflush(logfile);
+
+        int push_errno = 0;
+        if (push_file(task.target_host, task.target_port, task.target_path, file_data, file_size, &push_errno) == 0) {
+            now = time(NULL);
+            tm_info = localtime(&now);
+            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
+            fprintf(logfile,
+                "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PUSH] [SUCCESS] [%d bytes pushed]\n",
+                timestamp,
+                task.source_path, task.source_host, task.source_port,
+                task.target_path, task.target_host, task.target_port,
+                pid, file_size
+            );
+        } else {
+            const char *filename = strrchr(task.target_path, '/');
+            filename = filename ? filename + 1 : task.target_path;
+
+            now = time(NULL);
+            tm_info = localtime(&now);
+            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
+            fprintf(logfile,
+                "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PUSH] [ERROR] [File: %s - %s]\n",
+                timestamp,
+                task.source_path, task.source_host, task.source_port,
+                task.target_path, task.target_host, task.target_port,
+                pid, filename, strerror(push_errno)
+            );
+        }
+
+        fflush(logfile);
+        free(file_data);
+    } else {
+        const char *filename = strrchr(task.source_path, '/');
+        filename = filename ? filename + 1 : task.source_path;
+
+        fprintf(logfile,
+            "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PULL] [ERROR] [File: %s - %s]\n",
+            timestamp,
+            task.source_path, task.source_host, task.source_port,
+            task.target_path, task.target_host, task.target_port,
+            pid, filename, strerror(pull_errno)
+        );
+        fflush(logfile);
+    }
+}
+
+
+
+int send_list_and_process(sync_info_mem *entry, FILE *logfile) {
+    int sockfd = connect_to_client(entry->source_host, entry->source_port);
+    if (sockfd < 0) {
+        fprintf(logfile, "Failed to connect to %s:%d\n", entry->source_host, entry->source_port);
+        return -1;
+    }
+
+    char command[1024];
+    snprintf(command, sizeof(command), "LIST %s\n", entry->source_dir);
+    if (send(sockfd, command, strlen(command), 0) < 0) {
+        perror("send");
+        close(sockfd);
+        return -1;
+    }
+
+    FILE *sock_stream = fdopen(sockfd, "r");
+    if (!sock_stream) {
+        perror("fdopen");
+        close(sockfd);
+        return -1;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), sock_stream)) {
+        line[strcspn(line, "\n")] = '\0';
+        if (strcmp(line, ".") == 0) break;
+
+        sync_task task;
+        if (snprintf(task.source_path, MAX_PATH_LENGTH, "%s/%s", entry->source_dir, line) >= MAX_PATH_LENGTH) {
+            fprintf(logfile, "snprintf truncated source path\n");
+            continue;
+        }
+
+        if (snprintf(task.target_path, MAX_PATH_LENGTH, "%s/%s", entry->target_dir, line) >= MAX_PATH_LENGTH) {
+            fprintf(logfile, "snprintf truncated target path\n");
+            continue;
+        }
+
+        strncpy(task.source_host, entry->source_host, MAX_HOST_LENGTH);
+        strncpy(task.target_host, entry->target_host, MAX_HOST_LENGTH);
+        task.source_port = entry->source_port;
+        task.target_port = entry->target_port;
+        task.parent_entry = entry;
+
+        process_task_serially(task, logfile);
+    }
+
+    fclose(sock_stream);  
+    return 0;
+}
+
+void send_list_and_process_all(sync_info_mem_store *store, FILE *logfile) {
+    sync_info_mem *curr = store->head;
+    while (curr) {
+        send_list_and_process(curr, logfile);
+        curr = curr->next;
+    }
 }

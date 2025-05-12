@@ -72,8 +72,10 @@ int create_server_socket(int port);
 int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store);
 int connect_to_client(const char *ip, int port);
 int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_info_mem *entry);
-int pull_file(const char *host, int port, const char *filepath, char **out_data, int *out_size);
-int push_file(const char *host, int port, const char *filepath, const char *data, int size);
+int pull_file(const char *host, int port, const char *filepath,
+              char **out_data, int *out_size, int *out_errno);
+int push_file(const char *host, int port, const char *filepath,
+              const char *data, int size, int *out_errno);
 void init_task_queue(task_queue *q, int capacity);
 void destroy_task_queue(task_queue *q);
 void enqueue_task(task_queue *q, sync_task *task);
@@ -93,6 +95,8 @@ int handle_pull(int client_fd, const char *filepath);
 int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data);
 
 void* worker_thread(void *arg);
-void strip_extension(const char *filename, char *buffer, size_t bufsize);
 
+void send_list_and_process_all(sync_info_mem_store *store, FILE *logfile);
+int send_list_and_process(sync_info_mem *entry, FILE *logfile);
+void process_task_serially(sync_task task, FILE *log_fp);
 #endif // UTILS_H
