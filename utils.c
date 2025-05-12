@@ -221,8 +221,9 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
                     dst_port = atoi(colon + 1);
                 }
 
-                if (find_sync_info(store, src_dir)) {
-                    snprintf(response, sizeof(response), "%s Already in queue: %.900s\n", timestamp, src_dir);
+                sync_info_mem *existing_info = find_sync_info(store, src_dir);
+                if (existing_info && existing_info->active) {
+                     snprintf(response, sizeof(response), "%s Already in queue: %.900s\n", timestamp, src_dir);
                 } else {
                     sync_info_mem *info = malloc(sizeof(sync_info_mem));
                     if (info) {
@@ -311,15 +312,18 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
                 }
 
                 if (found) {
-                    found->active = 0;
-                    snprintf(response, sizeof(response), "%s Synchronization stopped for %s@%s:%d\n",
-                             timestamp, found->source_dir, found->source_host, found->source_port);
-                    fprintf(logfile, "%s Synchronization stopped for %s@%s:%d\n",
-                            timestamp, found->source_dir, found->source_host, found->source_port);
-                    fflush(logfile);
-
-                } else {
-                    snprintf(response, sizeof(response), "%s Directory not being synchronized: %.900s\n", timestamp, src);
+                    if (found->active) {
+                        found->active = 0;
+                        snprintf(response, sizeof(response), "%s Synchronization stopped for %s@%s:%d\n",
+                                timestamp, found->source_dir, found->source_host, found->source_port);
+                        fprintf(logfile, "%s Synchronization stopped for %s@%s:%d\n",
+                                timestamp, found->source_dir, found->source_host, found->source_port);
+                        fflush(logfile);
+                    } else {
+                        snprintf(response, sizeof(response),
+                                "%s Directory not being synchronized: %s@%s:%d\n",
+                                timestamp, found->source_dir, found->source_host, found->source_port);
+                    }
                 }
             } else {
                 snprintf(response, sizeof(response), "%s Invalid cancel command format.\n", timestamp);
@@ -1063,7 +1067,7 @@ void process_task_serially(sync_task task, FILE *logfile) {
 
     pid_t pid = getpid();
     char *source_no_ext = strip_extension(task.source_path);
-char *target_no_ext = strip_extension(task.target_path);
+    char *target_no_ext = strip_extension(task.target_path);
     int pull_errno = 0;
     if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size, &pull_errno) == 0) {
             fprintf(logfile,
