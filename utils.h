@@ -99,4 +99,6 @@ void* worker_thread(void *arg);
 void send_list_and_process_all(sync_info_mem_store *store, FILE *logfile);
 int send_list_and_process(sync_info_mem *entry, FILE *logfile);
 void process_task_serially(sync_task task, FILE *log_fp);
+char *strip_extension(const char *path);
+
 #endif // UTILS_H

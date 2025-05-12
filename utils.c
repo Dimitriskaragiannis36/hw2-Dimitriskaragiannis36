@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <pthread.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 FILE *global_log_fp = NULL;
 pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -240,13 +241,52 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
 
                         add_sync_info(store, info);
 
-                        snprintf(response, sizeof(response), "%s Added file: %s@%s:%d -> %s@%s:%d\n",
-                                 timestamp, src_dir, src_host, src_port,
-                                 dst_dir, dst_host, dst_port);
-                        fprintf(logfile, "%s Added file: %s@%s:%d -> %s@%s:%d\n",
-                                timestamp, src_dir, src_host, src_port,
-                                dst_dir, dst_host, dst_port);
-                        fflush(logfile);
+                        DIR *dir = opendir(src_dir);
+                        if (dir == NULL) {
+                            snprintf(response, sizeof(response), "%s Cannot open directory: %s\n", timestamp, src_dir);
+                        } else {
+                            struct dirent *entry;
+                            while ((entry = readdir(dir)) != NULL) {
+                                if (entry->d_type == DT_REG) { 
+                                    
+                                char filename_no_ext[256];
+                                strncpy(filename_no_ext, entry->d_name, 256 - 1);
+                                filename_no_ext[256 - 1] = '\0';
+
+                                char *dot = strrchr(filename_no_ext, '.');
+                                if (dot) {
+                                    *dot = '\0';
+                                }
+
+                                char log_src_path[MAX_PATH_LENGTH];
+                                char log_dst_path[MAX_PATH_LENGTH];
+                                snprintf(log_src_path, sizeof(log_src_path), "%s/%s", src_dir, filename_no_ext);
+                                snprintf(log_dst_path, sizeof(log_dst_path), "%s/%s", dst_dir, filename_no_ext);
+
+                                fprintf(logfile, "%s Added file: %s@%s:%d -> %s@%s:%d\n",
+                                        timestamp, log_src_path, src_host, src_port,
+                                        log_dst_path, dst_host, dst_port);
+                                fflush(logfile);
+
+                                char src_path[MAX_PATH_LENGTH];
+                                char dst_path[MAX_PATH_LENGTH];
+                                snprintf(src_path, sizeof(src_path), "%s/%s", src_dir, entry->d_name);
+                                snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, entry->d_name);
+                                    sync_task task;
+                                    strncpy(task.source_path, src_path, MAX_PATH_LENGTH);
+                                    strncpy(task.source_host, src_host, MAX_HOST_LENGTH);
+                                    task.source_port = src_port;
+
+                                    strncpy(task.target_path, dst_path, MAX_PATH_LENGTH);
+                                    strncpy(task.target_host, dst_host, MAX_HOST_LENGTH);
+                                    task.target_port = dst_port;
+
+                                    process_task_serially(task, logfile);
+                                }
+                            }
+                            closedir(dir);
+                            snprintf(response, sizeof(response), "%s Successfully synchronized directory.\n", timestamp);
+                        }
                     } else {
                         snprintf(response, sizeof(response), "%s Error allocating memory.\n", timestamp);
                     }
@@ -277,6 +317,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
                     fprintf(logfile, "%s Synchronization stopped for %s@%s:%d\n",
                             timestamp, found->source_dir, found->source_host, found->source_port);
                     fflush(logfile);
+
                 } else {
                     snprintf(response, sizeof(response), "%s Directory not being synchronized: %.900s\n", timestamp, src);
                 }
@@ -300,7 +341,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
     return shutdown_requested;
 }
 
-int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_info_mem *entry) {
+/*int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_info_mem *entry) {
     char command[1024];
     snprintf(command, sizeof(command), "LIST %s", source_dir);
 
@@ -337,7 +378,7 @@ int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_in
 
     fclose(sock_stream);
     return 0;
-}
+}*/
 
 int pull_file(const char *host, int port, const char *filepath,
               char **out_data, int *out_size, int *out_errno) {
@@ -982,11 +1023,11 @@ int handle_push(int client_fd, const char *filepath, int chunk_size, const char 
         return 0; 
     }
 
-    file = fopen(filepath, "ab");
+    file = fopen(filepath, "wb");
     if (!file) {
         int err = htonl(0x80000000 | errno);
         send(client_fd, &err, sizeof(int), 0);
-        perror("fopen append");
+        perror("fopen overwrite");
         return -1;
     }
 
@@ -1021,14 +1062,15 @@ void process_task_serially(sync_task task, FILE *logfile) {
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
 
     pid_t pid = getpid();
-
+    char *source_no_ext = strip_extension(task.source_path);
+char *target_no_ext = strip_extension(task.target_path);
     int pull_errno = 0;
     if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size, &pull_errno) == 0) {
             fprintf(logfile,
             "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PULL] [SUCCESS] [%d bytes pulled]\n",
             timestamp,
-            task.source_path, task.source_host, task.source_port,
-            task.target_path, task.target_host, task.target_port,
+            source_no_ext, task.source_host, task.source_port,
+            target_no_ext, task.target_host, task.target_port,
             pid, file_size
         );
         fflush(logfile);
@@ -1042,8 +1084,8 @@ void process_task_serially(sync_task task, FILE *logfile) {
             fprintf(logfile,
                 "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PUSH] [SUCCESS] [%d bytes pushed]\n",
                 timestamp,
-                task.source_path, task.source_host, task.source_port,
-                task.target_path, task.target_host, task.target_port,
+                source_no_ext, task.source_host, task.source_port,
+                target_no_ext, task.target_host, task.target_port,
                 pid, file_size
             );
         } else {
@@ -1057,8 +1099,8 @@ void process_task_serially(sync_task task, FILE *logfile) {
             fprintf(logfile,
                 "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PUSH] [ERROR] [File: %s - %s]\n",
                 timestamp,
-                task.source_path, task.source_host, task.source_port,
-                task.target_path, task.target_host, task.target_port,
+                source_no_ext, task.source_host, task.source_port,
+                target_no_ext, task.target_host, task.target_port,
                 pid, filename, strerror(push_errno)
             );
         }
@@ -1072,8 +1114,8 @@ void process_task_serially(sync_task task, FILE *logfile) {
         fprintf(logfile,
             "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PULL] [ERROR] [File: %s - %s]\n",
             timestamp,
-            task.source_path, task.source_host, task.source_port,
-            task.target_path, task.target_host, task.target_port,
+            source_no_ext, task.source_host, task.source_port,
+            target_no_ext, task.target_host, task.target_port,
             pid, filename, strerror(pull_errno)
         );
         fflush(logfile);
@@ -1139,4 +1181,21 @@ void send_list_and_process_all(sync_info_mem_store *store, FILE *logfile) {
         send_list_and_process(curr, logfile);
         curr = curr->next;
     }
+}
+
+
+
+char *strip_extension(const char *path) {
+    char *path_copy = strdup(path);  
+    if (!path_copy) return NULL;
+
+    char *basename = strrchr(path_copy, '/');
+    basename = basename ? basename + 1 : path_copy;
+
+    char *dot = strrchr(basename, '.');
+    if (dot) {
+        *dot = '\0';  
+    }
+
+    return path_copy;
 }
