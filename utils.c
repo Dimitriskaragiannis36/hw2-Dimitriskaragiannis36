@@ -298,33 +298,44 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
         }
 
         else if (strncmp(buffer, "cancel ", 7) == 0) {
-            char src[MAX_LINE_LENGTH];
+            char src[256];
             if (sscanf(buffer + 7, "%1023s", src) == 1) {
                 sync_info_mem *curr = store->head;
-                sync_info_mem *found = NULL;
+                int any_active_found = 0;
+                int any_inactive_found = 0;
+                response[0] = '\0';
 
                 while (curr) {
                     if (strcmp(curr->source_dir, src) == 0) {
-                        found = curr;
-                        break;
+                        if (curr->active) {
+                            curr->active = 0;
+                            any_active_found = 1;
+
+                            char msg[512];
+                            snprintf(msg, sizeof(msg), "%s Synchronization stopped for %s@%s:%d\n",
+                                    timestamp, curr->source_dir, curr->source_host, curr->source_port);
+                            strncat(response, msg, sizeof(response) - strlen(response) - 1);
+
+                            fprintf(logfile, "%s", msg);
+                            fflush(logfile);
+                        } else {
+                            any_inactive_found = 1;
+
+                            char msg[512];
+                            snprintf(msg, sizeof(msg),
+                                    "%s Directory not being synchronized: %s@%s:%d\n",
+                                    timestamp, curr->source_dir, curr->source_host, curr->source_port);
+                            strncat(response, msg, sizeof(response) - strlen(response) - 1);
+                        }
                     }
                     curr = curr->next;
                 }
 
-                if (found) {
-                    if (found->active) {
-                        found->active = 0;
-                        snprintf(response, sizeof(response), "%s Synchronization stopped for %s@%s:%d\n",
-                                timestamp, found->source_dir, found->source_host, found->source_port);
-                        fprintf(logfile, "%s Synchronization stopped for %s@%s:%d\n",
-                                timestamp, found->source_dir, found->source_host, found->source_port);
-                        fflush(logfile);
-                    } else {
-                        snprintf(response, sizeof(response),
-                                "%s Directory not being synchronized: %s@%s:%d\n",
-                                timestamp, found->source_dir, found->source_host, found->source_port);
-                    }
+                if (!any_active_found && !any_inactive_found) {
+                     snprintf(response, sizeof(response),
+             "%s Directory not being synchronized: %s\n", timestamp, src);
                 }
+
             } else {
                 snprintf(response, sizeof(response), "%s Invalid cancel command format.\n", timestamp);
             }
@@ -1064,11 +1075,11 @@ int handle_push(int client_fd, const char *filepath, int chunk_size, const char 
         return 0;
     }
 
-    fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    fd = open(filepath, O_WRONLY | O_APPEND, 0644);
     if (fd == -1) {
         int err = htonl(0x80000000 | errno);
         send(client_fd, &err, sizeof(int), 0);
-        perror("open overwrite");
+        perror("open append");
         return -1;
     }
 
