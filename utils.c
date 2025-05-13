@@ -417,18 +417,25 @@ int pull_file(const char *host, int port, const char *filepath,
         return -1;
     }
 
-    if (dprintf(sockfd, "PULL %s\n", filepath) < 0) {
-        int err = errno;
+    char msg[1024];
+    int msg_len = snprintf(msg, sizeof(msg), "PULL %s\n", filepath);
+    if (msg_len < 0 || msg_len >= (int)sizeof(msg)) {
+        if (out_errno) *out_errno = EINVAL;
         close(sockfd);
-        if (out_errno) *out_errno = err;
+        return -1;
+    }
+
+    if (write(sockfd, msg, msg_len) != msg_len) {
+        if (out_errno) *out_errno = errno;
+        close(sockfd);
         return -1;
     }
 
     int filesize_net;
-    if (recv(sockfd, &filesize_net, sizeof(int), 0) != sizeof(int)) {
-        int err = errno;
+    int n = recv(sockfd, &filesize_net, sizeof(int), 0);
+    if (n != sizeof(int)) {
+        if (out_errno) *out_errno = errno;
         close(sockfd);
-        if (out_errno) *out_errno = err;
         return -1;
     }
 
@@ -970,29 +977,59 @@ int connect_to_client(const char *ip, int port) {
 }
 
 int handle_pull(int client_fd, const char *filepath) {
-    FILE *file = fopen(filepath, "rb");
-    if (!file) {
+    int fd = open(filepath, O_RDONLY);
+    if (fd < 0) {
         int err = errno;
         int net_err = htonl(0x80000000 | err);  
         send(client_fd, &net_err, sizeof(int), 0);
-        perror("fopen (PULL)");
+        perror("open (PULL)");
         return -1;
     }
 
-    fseek(file, 0, SEEK_END);
-    long filesize = ftell(file);
-    rewind(file);
+    off_t filesize = lseek(fd, 0, SEEK_END);
+    if (filesize < 0) {
+        int err = errno;
+        close(fd);
+        int net_err = htonl(0x80000000 | err);
+        send(client_fd, &net_err, sizeof(int), 0);
+        perror("lseek (SEEK_END)");
+        return -1;
+    }
+
+    if (lseek(fd, 0, SEEK_SET) < 0) {
+        int err = errno;
+        close(fd);
+        int net_err = htonl(0x80000000 | err);
+        send(client_fd, &net_err, sizeof(int), 0);
+        perror("lseek (SEEK_SET)");
+        return -1;
+    }
 
     char *buffer = malloc(filesize);
     if (!buffer) {
-        fclose(file);
+        close(fd);
         int net_err = htonl(0x80000000 | ENOMEM);
         send(client_fd, &net_err, sizeof(int), 0);
         return -1;
     }
 
-    fread(buffer, 1, filesize, file);
-    fclose(file);
+    ssize_t total_read = 0;
+    while (total_read < filesize) {
+        ssize_t n = read(fd, buffer + total_read, filesize - total_read);
+        if (n < 0) {
+            int err = errno;
+            free(buffer);
+            close(fd);
+            int net_err = htonl(0x80000000 | err);
+            send(client_fd, &net_err, sizeof(int), 0);
+            perror("read");
+            return -1;
+        }
+        if (n == 0) break;  
+        total_read += n;
+    }
+
+    close(fd);
 
     int net_filesize = htonl((int)filesize);
     send(client_fd, &net_filesize, sizeof(int), 0);
@@ -1004,50 +1041,49 @@ int handle_pull(int client_fd, const char *filepath) {
 
 
 int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data) {
-    FILE *file;
+    int fd;
 
     if (chunk_size == -1) {
-        file = fopen(filepath, "wb");
-        if (!file) {
+        fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd == -1) {
             int err = htonl(0x80000000 | errno);
             send(client_fd, &err, sizeof(int), 0);
-            perror("fopen create");
+            perror("open create");
             return -1;
         }
-        fclose(file); 
+        close(fd);
 
-        int ok = htonl(0);  
+        int ok = htonl(0);
         send(client_fd, &ok, sizeof(int), 0);
         return 0;
     }
 
     if (chunk_size == 0) {
-        int ok = htonl(0);  
+        int ok = htonl(0);
         send(client_fd, &ok, sizeof(int), 0);
-        return 0; 
+        return 0;
     }
 
-    file = fopen(filepath, "wb");
-    if (!file) {
+    fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd == -1) {
         int err = htonl(0x80000000 | errno);
         send(client_fd, &err, sizeof(int), 0);
-        perror("fopen overwrite");
+        perror("open overwrite");
         return -1;
     }
 
-    size_t written = fwrite(data, 1, chunk_size, file);
-    if (written != (size_t)chunk_size) {
+    ssize_t written = write(fd, data, chunk_size);
+    if (written != chunk_size) {
         int err = htonl(0x80000000 | EIO);
         send(client_fd, &err, sizeof(int), 0);
-        perror("fwrite");
-        fclose(file);
+        perror("write");
+        close(fd);
         return -1;
     }
 
-    fflush(file);
-    fclose(file);
+    close(fd);
 
-    int ok = htonl(0);  
+    int ok = htonl(0);
     send(client_fd, &ok, sizeof(int), 0);
     return 0;
 }
