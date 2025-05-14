@@ -442,34 +442,81 @@ int pull_file(const char *host, int port, const char *filepath,
         return -1;
     }
 
-    int filesize_net;
-    int n = recv(sockfd, &filesize_net, sizeof(int), 0);
-    if (n != sizeof(int)) {
-        if (out_errno) *out_errno = errno;
+    char header[64];  
+    int header_pos = 0;
+    char c;
+
+    while (header_pos < (int)sizeof(header) - 1) {
+        int n = recv(sockfd, &c, 1, 0);
+        if (n <= 0) {
+            if (out_errno) *out_errno = (n == 0 ? ECONNRESET : errno);
+            close(sockfd);
+            return -1;
+        }
+        if (c == ' ') break;
+        header[header_pos++] = c;
+    }
+
+    header[header_pos] = '\0';
+    int filesize = atoi(header);
+
+    if (filesize == -1) {
+
+        char *errbuf = malloc(1024);
+        if (!errbuf) {
+            if (out_errno) *out_errno = ENOMEM;
+            close(sockfd);
+            return -1;
+        }
+
+        int capacity = 1024;
+        int len = 0;
+        while (1) {
+            int n = recv(sockfd, errbuf + len, capacity - len, 0);
+            if (n <= 0) break;  
+            len += n;
+            if (len == capacity) {
+                char *newbuf = realloc(errbuf, capacity * 2);
+                if (!newbuf) {
+                    free(errbuf);
+                    if (out_errno) *out_errno = ENOMEM;
+                    close(sockfd);
+                    return -1;
+                }
+                errbuf = newbuf;
+                capacity *= 2;
+            }
+        }
+
+        errbuf[len] = '\0';
+        fprintf(stderr, "Server error: %s\n", errbuf);
+      
+        if (out_errno) {
+            if (strstr(errbuf, "Permission denied")) *out_errno = EACCES;
+            else if (strstr(errbuf, "No such file or directory")) *out_errno = ENOENT;
+            else if (strstr(errbuf, "Is a directory")) *out_errno = EISDIR;
+            else if (strstr(errbuf, "Not a directory")) *out_errno = ENOTDIR;
+            else if (strstr(errbuf, "Bad file descriptor")) *out_errno = EBADF;
+            else if (strstr(errbuf, "Invalid argument")) *out_errno = EINVAL;
+            else if (strstr(errbuf, "File exists")) *out_errno = EEXIST;
+            else *out_errno = EIO;  
+        }
+
+        free(errbuf);
         close(sockfd);
         return -1;
     }
-
-    int raw = ntohl(filesize_net);
-    if (raw & 0x80000000) {
-        int err = raw & 0x7FFFFFFF;  
-        close(sockfd);
-        if (out_errno) *out_errno = err;
-        return -1;
-    }
-
-    int filesize = raw;  
 
     if (filesize <= 0) {
-        close(sockfd);
         if (out_errno) *out_errno = EIO;
+        close(sockfd);
         return -1;
     }
 
     char *data = malloc(filesize);
     if (!data) {
-        close(sockfd);
         if (out_errno) *out_errno = ENOMEM;
+        close(sockfd);
         return -1;
     }
 
@@ -491,6 +538,7 @@ int pull_file(const char *host, int port, const char *filepath,
     close(sockfd);
     return 0;
 }
+
 
 
 int push_file(const char *host, int port, const char *filepath,
@@ -990,66 +1038,59 @@ int connect_to_client(const char *ip, int port) {
 int handle_pull(int client_fd, const char *filepath) {
     int fd = open(filepath, O_RDONLY);
     if (fd < 0) {
-        int err = errno;
-        int net_err = htonl(0x80000000 | err);  
-        send(client_fd, &net_err, sizeof(int), 0);
+        char msg[512];
+        snprintf(msg, sizeof(msg), "-1 Failed to open file: %s\n", strerror(errno));
+        send(client_fd, msg, strlen(msg), 0);
         perror("open (PULL)");
         return -1;
     }
 
     off_t filesize = lseek(fd, 0, SEEK_END);
     if (filesize < 0) {
-        int err = errno;
+        char msg[512];
+        snprintf(msg, sizeof(msg), "-1 Failed to stat file: %s\n", strerror(errno));
         close(fd);
-        int net_err = htonl(0x80000000 | err);
-        send(client_fd, &net_err, sizeof(int), 0);
+        send(client_fd, msg, strlen(msg), 0);
         perror("lseek (SEEK_END)");
         return -1;
     }
 
     if (lseek(fd, 0, SEEK_SET) < 0) {
-        int err = errno;
+        char msg[512];
+        snprintf(msg, sizeof(msg), "-1 Failed to rewind file: %s\n", strerror(errno));
         close(fd);
-        int net_err = htonl(0x80000000 | err);
-        send(client_fd, &net_err, sizeof(int), 0);
+        send(client_fd, msg, strlen(msg), 0);
         perror("lseek (SEEK_SET)");
         return -1;
     }
 
-    char *buffer = malloc(filesize);
-    if (!buffer) {
+    char header[64];
+    int header_len = snprintf(header, sizeof(header), "%ld ", (long)filesize);
+    if (send(client_fd, header, header_len, 0) != header_len) {
+        perror("send (header)");
         close(fd);
-        int net_err = htonl(0x80000000 | ENOMEM);
-        send(client_fd, &net_err, sizeof(int), 0);
         return -1;
     }
 
-    ssize_t total_read = 0;
-    while (total_read < filesize) {
-        ssize_t n = read(fd, buffer + total_read, filesize - total_read);
-        if (n < 0) {
-            int err = errno;
-            free(buffer);
+    char buffer[4096];
+    ssize_t n;
+    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
+        if (send(client_fd, buffer, n, 0) != n) {
+            perror("send (file data)");
             close(fd);
-            int net_err = htonl(0x80000000 | err);
-            send(client_fd, &net_err, sizeof(int), 0);
-            perror("read");
             return -1;
         }
-        if (n == 0) break;  
-        total_read += n;
+    }
+
+    if (n < 0) {
+        perror("read (file)");
+        close(fd);
+        return -1;
     }
 
     close(fd);
-
-    int net_filesize = htonl((int)filesize);
-    send(client_fd, &net_filesize, sizeof(int), 0);
-    send(client_fd, buffer, filesize, 0);
-
-    free(buffer);
     return 0;
 }
-
 
 int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data) {
     int fd;
