@@ -241,7 +241,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
 
                         add_sync_info(store, info);
 
-                        DIR *dir = opendir(src_dir);
+                        DIR *dir = opendir(strip_leading_slash(src_dir));
                         if (dir == NULL) {
                             snprintf(response, sizeof(response), "%s Cannot open directory: %s\n", timestamp, src_dir);
                         } else {
@@ -904,7 +904,7 @@ void handle_client(int client_fd) {
     if (strncmp(buffer, "LIST ", 5) == 0) {
         char *dir_path = buffer + 5;
         dir_path[strcspn(dir_path, "\r\n")] = '\0';
-        DIR *dir = opendir(dir_path);
+        DIR *dir = opendir(strip_leading_slash(dir_path));
         if (!dir) {
             perror("opendir");
             send(client_fd, ".\n", 2, 0);
@@ -926,7 +926,7 @@ void handle_client(int client_fd) {
         char *filepath = buffer + 5;
         filepath[strcspn(filepath, "\n")] = '\0';
         printf("[nfs_client] Received PULL for path: '%s'\n", filepath);
-        handle_pull(client_fd, filepath);
+        handle_pull(client_fd, strip_leading_slash(filepath));
     }
 
     else if (strncmp(buffer, "PUSH ", 5) == 0) {
@@ -964,8 +964,7 @@ void handle_client(int client_fd) {
             total_read += n;
         }
 
-
-        handle_push(client_fd, filepath, chunk_size, chunk_data);
+        handle_push(client_fd, strip_leading_slash(filepath), chunk_size, chunk_data);
         free(chunk_data);
     }
 }
@@ -1271,4 +1270,10 @@ char *strip_extension(const char *path) {
     }
 
     return path_copy;
+}
+
+const char* strip_leading_slash(const char* path) {
+    if (path[0] == '/')
+        return path + 1;
+    return path;
 }
