@@ -68,23 +68,6 @@ void read_config_file(const char *filename, FILE *log_fp, sync_info_mem_store *s
         info->error_count = 0;
         info->last_sync_time = 0;
 
-        time_t now = time(NULL);
-        struct tm *tm_info = localtime(&now);
-        char timestamp[64];
-        strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
-
-        fprintf(log_fp, "%s Added file: %s@%s:%d -> %s@%s:%d\n",
-                timestamp,
-                info->source_dir, info->source_host, info->source_port,
-                info->target_dir, info->target_host, info->target_port);
-
-        fflush(log_fp); 
-
-        printf("%s Added file: %s@%s:%d -> %s@%s:%d\n",
-            timestamp,
-            info->source_dir, info->source_host, info->source_port,
-            info->target_dir, info->target_host, info->target_port);
-
         add_sync_info(store, info);
     }
 
@@ -187,6 +170,9 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                      "%s Processing remaining queued tasks.\n"
                      "%s Manager shutdown complete\n",
                      timestamp, timestamp, timestamp, timestamp);
+            printf("%s", response);
+            fflush(stdout);
+
             shutdown_requested = 1;
         }
 
@@ -222,7 +208,9 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
 
                 sync_info_mem *existing_info = find_sync_info(store, src_dir);
                 if (existing_info && existing_info->active) {
-                     snprintf(response, sizeof(response), "%s Already in queue: %.900s\n", timestamp, src_dir);
+                    snprintf(response, sizeof(response), "%s Already in queue: %.900s\n", timestamp, src_dir);
+                    printf("%s", response);
+                    fflush(stdout);
                 } else {
                     sync_info_mem *info = malloc(sizeof(sync_info_mem));
                     if (info) {
@@ -249,29 +237,41 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                             while ((entry = readdir(dir)) != NULL) {
                                 if (entry->d_type == DT_REG) { 
                                     
-                                char filename_no_ext[256];
-                                strncpy(filename_no_ext, entry->d_name, 256 - 1);
-                                filename_no_ext[256 - 1] = '\0';
+                                    char filename_no_ext[256];
+                                    strncpy(filename_no_ext, entry->d_name, 256 - 1);
+                                    filename_no_ext[256 - 1] = '\0';
 
-                                char *dot = strrchr(filename_no_ext, '.');
-                                if (dot) {
-                                    *dot = '\0';
-                                }
+                                    char *dot = strrchr(filename_no_ext, '.');
+                                    if (dot) {
+                                        *dot = '\0';
+                                    }
 
-                                char log_src_path[MAX_PATH_LENGTH];
-                                char log_dst_path[MAX_PATH_LENGTH];
-                                snprintf(log_src_path, sizeof(log_src_path), "%s/%s", src_dir, filename_no_ext);
-                                snprintf(log_dst_path, sizeof(log_dst_path), "%s/%s", dst_dir, filename_no_ext);
+                                    char log_src_path[MAX_PATH_LENGTH];
+                                    char log_dst_path[MAX_PATH_LENGTH];
+                                    snprintf(log_src_path, sizeof(log_src_path), "%s/%s", src_dir, filename_no_ext);
+                                    snprintf(log_dst_path, sizeof(log_dst_path), "%s/%s", dst_dir, filename_no_ext);
 
-                                fprintf(logfile, "%s Added file: %s@%s:%d -> %s@%s:%d\n",
-                                        timestamp, log_src_path, src_host, src_port,
-                                        log_dst_path, dst_host, dst_port);
-                                fflush(logfile);
+                                    fprintf(logfile, "%s Added file: %s@%s:%d -> %s@%s:%d\n",
+                                            timestamp, log_src_path, src_host, src_port,
+                                            log_dst_path, dst_host, dst_port);
+                                    fflush(logfile);
 
-                                char src_path[MAX_PATH_LENGTH];
-                                char dst_path[MAX_PATH_LENGTH];
-                                snprintf(src_path, sizeof(src_path), "%s/%s", src_dir, entry->d_name);
-                                snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, entry->d_name);
+                                    char line[512];
+                                    int len = snprintf(line, sizeof(line), "%s Added file: %s@%s:%d -> %s@%s:%d\n",
+                                                    timestamp, log_src_path, src_host, src_port,
+                                                    log_dst_path, dst_host, dst_port);
+
+                                    if (len >= sizeof(line)) {
+                                        fprintf(stderr, "Warning: log line truncated\n");
+                                        line[sizeof(line) - 2] = '\n';  
+                                        line[sizeof(line) - 1] = '\0';  
+                                    }
+                                    strncat(response, line, sizeof(response) - strlen(response) - 1);
+
+                                    char src_path[MAX_PATH_LENGTH];
+                                    char dst_path[MAX_PATH_LENGTH];
+                                    snprintf(src_path, sizeof(src_path), "%s/%s", src_dir, entry->d_name);
+                                    snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, entry->d_name);
                                     sync_task task;
                                     strncpy(task.source_path, src_path, MAX_PATH_LENGTH);
                                     strncpy(task.source_host, src_host, MAX_HOST_LENGTH);
@@ -285,7 +285,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                                 }
                             }
                             closedir(dir);
-                            snprintf(response, sizeof(response), "%s Successfully synchronized directory.\n", timestamp);
+
                         }
                     } else {
                         snprintf(response, sizeof(response), "%s Error allocating memory.\n", timestamp);
@@ -317,6 +317,8 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
 
                             fprintf(logfile, "%s", msg);
                             fflush(logfile);
+                            printf("%s", msg);
+                            fflush(stdout);
                         } else {
                             any_inactive_found = 1;
 
@@ -325,14 +327,18 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                                     "%s Directory not being synchronized: %s@%s:%d\n",
                                     timestamp, curr->source_dir, curr->source_host, curr->source_port);
                             strncat(response, msg, sizeof(response) - strlen(response) - 1);
+                            printf("%s", msg);
+                            fflush(stdout);
                         }
                     }
                     curr = curr->next;
                 }
 
                 if (!any_active_found && !any_inactive_found) {
-                     snprintf(response, sizeof(response),
-             "%s Directory not being synchronized: %s\n", timestamp, src);
+                    snprintf(response, sizeof(response),
+                     "%s Directory not being synchronized: %s\n", timestamp, src);
+                    printf("%s", response);
+                    fflush(stdout);
                 }
 
             } else {
@@ -355,44 +361,6 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
     return shutdown_requested;
 }
 
-/*int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_info_mem *entry) {
-    char command[1024];
-    snprintf(command, sizeof(command), "LIST %s", source_dir);
-
-    if (send(sockfd, command, strlen(command), 0) < 0) {
-        perror("send");
-        return -1;
-    }
-
-    FILE *sock_stream = fdopen(sockfd, "r");
-    if (!sock_stream) {
-        perror("fdopen");
-        return -1;
-    }
-
-    char line[1024];
-    while (fgets(line, sizeof(line), sock_stream)) {
-        line[strcspn(line, "\n")] = '\0';
-        if (strcmp(line, ".") == 0) break;
-
-    fprintf(logfile,
-        "[%s] Added file: %s/%s@%s:%d -> %s/%s@%s:%d\n",
-        entry->source_dir,    
-        entry->source_dir,        
-        line,                    
-        entry->source_host,       
-        entry->source_port,       
-        entry->target_dir,        
-        line,                     
-        entry->target_host,       
-        entry->target_port       
-    );
-        fflush(logfile);
-    }
-
-    fclose(sock_stream);
-    return 0;
-}*/
 
 int pull_file(const char *host, int port, const char *filepath,
               char **out_data, int *out_size, int *out_errno) {
@@ -681,7 +649,6 @@ void dequeue_task(task_queue *q, sync_task *task_out) {
 
 void* worker_thread(void *arg) {
     worker_args *args = (worker_args*) arg;
-    int id = args->id;
     task_queue *q = args->queue;
 
     while (1) {
@@ -692,11 +659,24 @@ void* worker_thread(void *arg) {
             break; 
         }
 
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        char timestamp[64];
+        strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
+
+        char *stripped_source = strip_extension(task.source_path);
+        char *stripped_target = strip_extension(task.target_path);
+
         pthread_mutex_lock(&log_mutex);
-        fprintf(args->log_fp, "[THREAD %d] Processing task from %s:%d:%s -> %s:%d:%s\n",
-                id,
-                task.source_host, task.source_port, task.source_path,
-                task.target_host, task.target_port, task.target_path);
+        fprintf(args->log_fp, "%s Added file: %s@%s:%d -> %s@%s:%d\n",
+                timestamp,
+                stripped_source, task.source_host, task.source_port,
+                stripped_target, task.target_host, task.target_port);
+                    
+        printf("%s Added file: %s@%s:%d -> %s@%s:%d\n",
+               timestamp,
+               stripped_source, task.source_host, task.source_port,
+               stripped_target, task.target_host, task.target_port);
         pthread_mutex_unlock(&log_mutex);
 
         process_task_serially(task, args->log_fp, args->log_mutex);
@@ -925,7 +905,6 @@ void handle_client(int client_fd) {
     else if (strncmp(buffer, "PULL ", 5) == 0) {
         char *filepath = buffer + 5;
         filepath[strcspn(filepath, "\n")] = '\0';
-        printf("[nfs_client] Received PULL for path: '%s'\n", filepath);
         handle_pull(client_fd, strip_leading_slash(filepath));
     }
 
@@ -1193,68 +1172,6 @@ void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_m
         pthread_mutex_unlock(log_mutex);
     }
 }
-
-
-
-/*int send_list_and_process(sync_info_mem *entry, FILE *logfile) {
-    int sockfd = connect_to_client(entry->source_host, entry->source_port);
-    if (sockfd < 0) {
-        fprintf(logfile, "Failed to connect to %s:%d\n", entry->source_host, entry->source_port);
-        return -1;
-    }
-
-    char command[1024];
-    snprintf(command, sizeof(command), "LIST %s\n", entry->source_dir);
-    if (send(sockfd, command, strlen(command), 0) < 0) {
-        perror("send");
-        close(sockfd);
-        return -1;
-    }
-
-    FILE *sock_stream = fdopen(sockfd, "r");
-    if (!sock_stream) {
-        perror("fdopen");
-        close(sockfd);
-        return -1;
-    }
-
-    char line[1024];
-    while (fgets(line, sizeof(line), sock_stream)) {
-        line[strcspn(line, "\n")] = '\0';
-        if (strcmp(line, ".") == 0) break;
-
-        sync_task task;
-        if (snprintf(task.source_path, MAX_PATH_LENGTH, "%s/%s", entry->source_dir, line) >= MAX_PATH_LENGTH) {
-            fprintf(logfile, "snprintf truncated source path\n");
-            continue;
-        }
-
-        if (snprintf(task.target_path, MAX_PATH_LENGTH, "%s/%s", entry->target_dir, line) >= MAX_PATH_LENGTH) {
-            fprintf(logfile, "snprintf truncated target path\n");
-            continue;
-        }
-
-        strncpy(task.source_host, entry->source_host, MAX_HOST_LENGTH);
-        strncpy(task.target_host, entry->target_host, MAX_HOST_LENGTH);
-        task.source_port = entry->source_port;
-        task.target_port = entry->target_port;
-        task.parent_entry = entry;
-
-        process_task_serially(task, logfile);
-    }
-
-    fclose(sock_stream);  
-    return 0;
-}
-
-void send_list_and_process_all(sync_info_mem_store *store, FILE *logfile) {
-    sync_info_mem *curr = store->head;
-    while (curr) {
-        send_list_and_process(curr, logfile);
-        curr = curr->next;
-    }
-}*/
-
 
 
 char *strip_extension(const char *path) {
