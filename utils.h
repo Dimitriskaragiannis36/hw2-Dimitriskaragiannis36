@@ -98,6 +98,7 @@ void command_loop(int sockfd, FILE *logfile);
 
 int start_server_socket(int port);
 void handle_client(int client_fd);
+void *handle_client_thread(void *arg);
 int handle_pull(int client_fd, const char *filepath);
 int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data);
 

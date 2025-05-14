@@ -966,6 +966,16 @@ void handle_client(int client_fd) {
     }
 }
 
+void *handle_client_thread(void *arg) {
+    int client_fd = *(int *)arg;
+    free(arg);
+
+    handle_client(client_fd);
+    close(client_fd);
+
+    return NULL;
+}
+
 int connect_to_client(const char *ip, int port) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
