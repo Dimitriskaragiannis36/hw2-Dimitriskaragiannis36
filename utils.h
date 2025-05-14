@@ -68,6 +68,7 @@ typedef struct {
     int id;
     task_queue *queue;
     FILE *log_fp;
+    pthread_mutex_t *log_mutex;
 } worker_args;
 
 void usage_m(const char *prog_name);
@@ -76,7 +77,7 @@ void add_sync_info(sync_info_mem_store *store, sync_info_mem *info);
 sync_info_mem* find_sync_info(sync_info_mem_store *store, const char *source_dir);
 void free_sync_info_store(sync_info_mem_store *store);
 int create_server_socket(int port);
-int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store);
+int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, pthread_mutex_t *log_mutex);
 int connect_to_client(const char *ip, int port);
 int send_list_command(int sockfd, const char *source_dir, FILE *logfile, sync_info_mem *entry);
 int pull_file(const char *host, int port, const char *filepath,
@@ -106,7 +107,7 @@ void* worker_thread(void *arg);
 
 void send_list_and_process_all(sync_info_mem_store *store, FILE *logfile);
 int send_list_and_process(sync_info_mem *entry, FILE *logfile);
-void process_task_serially(sync_task task, FILE *log_fp);
+void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_mutex);
 char *strip_extension(const char *path);
 
 #endif // UTILS_H

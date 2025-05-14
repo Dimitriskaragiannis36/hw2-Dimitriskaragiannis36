@@ -60,11 +60,13 @@ int main(int argc, char *argv[]) {
     init_task_queue(&queue, bufferSize);  
 
     pthread_t workers[worker_limit];
+    pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
     worker_args args[worker_limit];
     for (int i = 0; i < worker_limit; ++i) {
         args[i].id = i;
         args[i].queue = &queue;
         args[i].log_fp = manager_logfile;
+        args[i].log_mutex = &log_mutex;
         pthread_create(&workers[i], NULL, worker_thread, &args[i]);
     }
 
@@ -83,7 +85,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        int shutdown_requested = handle_command(client_sock, manager_logfile, &store);
+        int shutdown_requested = handle_command(client_sock, manager_logfile, &store, &log_mutex);
         if (shutdown_requested) {
             shutting_down = 1;
 

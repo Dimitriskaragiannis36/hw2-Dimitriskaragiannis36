@@ -154,8 +154,7 @@ int create_server_socket(int port) {
 
     return sockfd;
 }
-
-int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
+int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, pthread_mutex_t *log_mutex) {
     char buffer[MAX_LINE_LENGTH];
     char response[MAX_LINE_LENGTH];
     int shutdown_requested = 0;
@@ -282,7 +281,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store) {
                                     strncpy(task.target_host, dst_host, MAX_HOST_LENGTH);
                                     task.target_port = dst_port;
 
-                                    process_task_serially(task, logfile);
+                                    process_task_serially(task, logfile, log_mutex);
                                 }
                             }
                             closedir(dir);
@@ -700,7 +699,7 @@ void* worker_thread(void *arg) {
                 task.target_host, task.target_port, task.target_path);
         pthread_mutex_unlock(&log_mutex);
 
-        process_task_serially(task, args->log_fp);
+        process_task_serially(task, args->log_fp, args->log_mutex);
     }
 
     return NULL;
@@ -1112,7 +1111,7 @@ int handle_push(int client_fd, const char *filepath, int chunk_size, const char 
 
 
 
-void process_task_serially(sync_task task, FILE *logfile) {
+void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_mutex) {
     char *file_data = NULL;
     int file_size = 0;
 
@@ -1126,7 +1125,8 @@ void process_task_serially(sync_task task, FILE *logfile) {
     char *target_no_ext = strip_extension(task.target_path);
     int pull_errno = 0;
     if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size, &pull_errno) == 0) {
-            fprintf(logfile,
+        pthread_mutex_lock(log_mutex);    
+        fprintf(logfile,
             "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PULL] [SUCCESS] [%d bytes pulled]\n",
             timestamp,
             source_no_ext, task.source_host, task.source_port,
@@ -1134,6 +1134,7 @@ void process_task_serially(sync_task task, FILE *logfile) {
             pid, file_size
         );
         fflush(logfile);
+        pthread_mutex_unlock(log_mutex);
 
         int push_errno = 0;
         if (push_file(task.target_host, task.target_port, task.target_path, file_data, file_size, &push_errno) == 0) {
@@ -1141,6 +1142,7 @@ void process_task_serially(sync_task task, FILE *logfile) {
             tm_info = localtime(&now);
             strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
 
+            pthread_mutex_lock(log_mutex);
             fprintf(logfile,
                 "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PUSH] [SUCCESS] [%d bytes pushed]\n",
                 timestamp,
@@ -1148,6 +1150,8 @@ void process_task_serially(sync_task task, FILE *logfile) {
                 target_no_ext, task.target_host, task.target_port,
                 pid, file_size
             );
+            fflush(logfile);
+            pthread_mutex_unlock(log_mutex);
         } else {
             const char *filename = strrchr(task.target_path, '/');
             filename = filename ? filename + 1 : task.target_path;
@@ -1156,6 +1160,7 @@ void process_task_serially(sync_task task, FILE *logfile) {
             tm_info = localtime(&now);
             strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
 
+            pthread_mutex_lock(log_mutex);
             fprintf(logfile,
                 "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PUSH] [ERROR] [File: %s - %s]\n",
                 timestamp,
@@ -1163,14 +1168,16 @@ void process_task_serially(sync_task task, FILE *logfile) {
                 target_no_ext, task.target_host, task.target_port,
                 pid, filename, strerror(push_errno)
             );
+            fflush(logfile);
+            pthread_mutex_unlock(log_mutex);
         }
 
-        fflush(logfile);
         free(file_data);
     } else {
         const char *filename = strrchr(task.source_path, '/');
         filename = filename ? filename + 1 : task.source_path;
 
+        pthread_mutex_lock(log_mutex);
         fprintf(logfile,
             "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PULL] [ERROR] [File: %s - %s]\n",
             timestamp,
@@ -1179,12 +1186,13 @@ void process_task_serially(sync_task task, FILE *logfile) {
             pid, filename, strerror(pull_errno)
         );
         fflush(logfile);
+        pthread_mutex_unlock(log_mutex);
     }
 }
 
 
 
-int send_list_and_process(sync_info_mem *entry, FILE *logfile) {
+/*int send_list_and_process(sync_info_mem *entry, FILE *logfile) {
     int sockfd = connect_to_client(entry->source_host, entry->source_port);
     if (sockfd < 0) {
         fprintf(logfile, "Failed to connect to %s:%d\n", entry->source_host, entry->source_port);
@@ -1241,7 +1249,7 @@ void send_list_and_process_all(sync_info_mem_store *store, FILE *logfile) {
         send_list_and_process(curr, logfile);
         curr = curr->next;
     }
-}
+}*/
 
 
 
