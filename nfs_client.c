@@ -13,6 +13,7 @@
 #define MAX_LINE 1024
 
 volatile sig_atomic_t running = 1;
+volatile int shutting_down = 0;
 
 void handle_sigterm(int sig) {
     running = 0;

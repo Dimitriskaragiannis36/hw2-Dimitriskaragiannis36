@@ -8,6 +8,8 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+volatile int shutting_down = 0;
+
 int main(int argc, char *argv[]) {
     FILE *logfile = NULL;
     char *host_ip = NULL;

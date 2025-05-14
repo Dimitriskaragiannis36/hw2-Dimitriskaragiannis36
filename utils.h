@@ -17,6 +17,7 @@
 
 extern FILE *global_log_fp;
 extern pthread_mutex_t log_mutex;
+extern volatile int shutting_down;
 
 typedef struct sync_info_mem {
     char source_host[MAX_HOST_LENGTH];
@@ -62,6 +63,12 @@ typedef struct {
     pthread_cond_t not_full;
     pthread_cond_t not_empty;
 } task_queue;
+
+typedef struct {
+    int id;
+    task_queue *queue;
+    FILE *log_fp;
+} worker_args;
 
 void usage_m(const char *prog_name);
 void read_config_file(const char *filename, FILE *log_fp, sync_info_mem_store *store);

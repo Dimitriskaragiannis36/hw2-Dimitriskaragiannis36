@@ -661,8 +661,14 @@ void enqueue_task(task_queue *q, sync_task *task) {
 
 void dequeue_task(task_queue *q, sync_task *task_out) {
     pthread_mutex_lock(&q->mutex);
-    while (q->count == 0) {
+    while (q->count == 0 && !shutting_down) {
         pthread_cond_wait(&q->not_empty, &q->mutex);
+    }
+
+    if (shutting_down && q->count == 0) {
+        pthread_mutex_unlock(&q->mutex);
+        task_out->source_path[0] = '\0'; 
+        return;
     }
 
     *task_out = q->tasks[q->front];
@@ -673,81 +679,33 @@ void dequeue_task(task_queue *q, sync_task *task_out) {
     pthread_mutex_unlock(&q->mutex);
 }
 
-/*void *worker_thread(void *arg) {
-    task_queue *queue = (task_queue *)arg;
-    char timestamp[64];
+
+void* worker_thread(void *arg) {
+    worker_args *args = (worker_args*) arg;
+    int id = args->id;
+    task_queue *q = args->queue;
 
     while (1) {
         sync_task task;
-        dequeue_task(queue, &task);
+        dequeue_task(q, &task);
 
-        char *file_data = NULL;
-        int file_size = 0;
-
-        time_t now = time(NULL);
-        struct tm *tm_info = localtime(&now);
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-
-        pthread_t tid = pthread_self();
-
-        // PULL
-        if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size) == 0) {
-            pthread_mutex_lock(&log_mutex);
-            fprintf(global_log_fp,
-                    "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PULL] [SUCCESS] [%d bytes pulled]\n",
-                    timestamp,
-                    task.source_path, task.source_host, task.source_port,
-                    task.target_path, task.target_host, task.target_port,
-                    (unsigned long)tid, file_size);
-            fflush(global_log_fp);
-            pthread_mutex_unlock(&log_mutex);
-
-            // PUSH
-            if (push_file(task.target_host, task.target_port, task.target_path, file_data, file_size) == 0) {
-                now = time(NULL);
-                tm_info = localtime(&now);
-                strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-
-                pthread_mutex_lock(&log_mutex);
-                fprintf(global_log_fp,
-                        "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PUSH] [SUCCESS] [%d bytes pushed]\n",
-                        timestamp,
-                        task.source_path, task.source_host, task.source_port,
-                        task.target_path, task.target_host, task.target_port,
-                        (unsigned long)tid, file_size);
-                fflush(global_log_fp);
-                pthread_mutex_unlock(&log_mutex);
-            } else {
-                now = time(NULL);
-                tm_info = localtime(&now);
-                strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-
-                pthread_mutex_lock(&log_mutex);
-                fprintf(global_log_fp,
-                        "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PUSH] [ERROR] [%s]\n",
-                        timestamp,
-                        task.source_path, task.source_host, task.source_port,
-                        task.target_path, task.target_host, task.target_port,
-                        (unsigned long)tid, strerror(errno));
-                fflush(global_log_fp);
-                pthread_mutex_unlock(&log_mutex);
-            }
-            free(file_data);
-        } else {
-            pthread_mutex_lock(&log_mutex);
-            fprintf(global_log_fp,
-                    "[%s] [%s@%s:%d] [%s@%s:%d] [%lu] [PULL] [ERROR] [%s]\n",
-                    timestamp,
-                    task.source_path, task.source_host, task.source_port,
-                    task.target_path, task.target_host, task.target_port,
-                    (unsigned long)tid, strerror(errno));
-            fflush(global_log_fp);
-            pthread_mutex_unlock(&log_mutex);
+        if (shutting_down && task.source_path[0] == '\0') {
+            break; 
         }
+
+        pthread_mutex_lock(&log_mutex);
+        fprintf(args->log_fp, "[THREAD %d] Processing task from %s:%d:%s -> %s:%d:%s\n",
+                id,
+                task.source_host, task.source_port, task.source_path,
+                task.target_host, task.target_port, task.target_path);
+        pthread_mutex_unlock(&log_mutex);
+
+        process_task_serially(task, args->log_fp);
     }
 
     return NULL;
-}*/
+}
+
 
 void send_list_and_enqueue_tasks(sync_info_mem_store *store, task_queue *queue, FILE *logfile) {
     sync_info_mem *curr = store->head;
