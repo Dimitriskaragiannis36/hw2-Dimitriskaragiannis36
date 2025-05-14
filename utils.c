@@ -741,6 +741,11 @@ int send_list_and_enqueue(sync_info_mem *entry, task_queue *queue, FILE *logfile
         line[strcspn(line, "\n")] = '\0';
         if (strcmp(line, ".") == 0) break;
 
+        if (!entry->active) {
+            fprintf(logfile, "Task skipped due to cancellation of %s\n", entry->source_dir);
+            break;
+        }
+
         sync_task task;
         if (snprintf(task.source_path, MAX_PATH_LENGTH, "%s/%s", entry->source_dir, line) >= MAX_PATH_LENGTH) {
             fprintf(logfile, "snprintf truncated source path\n");
@@ -1120,18 +1125,18 @@ void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_m
     struct tm *tm_info = localtime(&now);
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
 
-    pid_t pid = getpid();
+    pthread_t thread_pid = pthread_self();
     char *source_no_ext = strip_extension(task.source_path);
     char *target_no_ext = strip_extension(task.target_path);
     int pull_errno = 0;
     if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size, &pull_errno) == 0) {
         pthread_mutex_lock(log_mutex);    
         fprintf(logfile,
-            "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PULL] [SUCCESS] [%d bytes pulled]\n",
+            "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PULL] [SUCCESS] [%d bytes pulled]\n",
             timestamp,
             source_no_ext, task.source_host, task.source_port,
             target_no_ext, task.target_host, task.target_port,
-            pid, file_size
+            (long)thread_pid, file_size
         );
         fflush(logfile);
         pthread_mutex_unlock(log_mutex);
@@ -1144,11 +1149,11 @@ void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_m
 
             pthread_mutex_lock(log_mutex);
             fprintf(logfile,
-                "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PUSH] [SUCCESS] [%d bytes pushed]\n",
+                "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PUSH] [SUCCESS] [%d bytes pushed]\n",
                 timestamp,
                 source_no_ext, task.source_host, task.source_port,
                 target_no_ext, task.target_host, task.target_port,
-                pid, file_size
+                (long)thread_pid, file_size
             );
             fflush(logfile);
             pthread_mutex_unlock(log_mutex);
@@ -1162,11 +1167,11 @@ void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_m
 
             pthread_mutex_lock(log_mutex);
             fprintf(logfile,
-                "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PUSH] [ERROR] [File: %s - %s]\n",
+                "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PUSH] [ERROR] [File: %s - %s]\n",
                 timestamp,
                 source_no_ext, task.source_host, task.source_port,
                 target_no_ext, task.target_host, task.target_port,
-                pid, filename, strerror(push_errno)
+                (long)thread_pid, filename, strerror(push_errno)
             );
             fflush(logfile);
             pthread_mutex_unlock(log_mutex);
@@ -1179,11 +1184,11 @@ void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_m
 
         pthread_mutex_lock(log_mutex);
         fprintf(logfile,
-            "[%s] [%s@%s:%d] [%s@%s:%d] [%d] [PULL] [ERROR] [File: %s - %s]\n",
+            "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PULL] [ERROR] [File: %s - %s]\n",
             timestamp,
             source_no_ext, task.source_host, task.source_port,
             target_no_ext, task.target_host, task.target_port,
-            pid, filename, strerror(pull_errno)
+            (long)thread_pid, filename, strerror(pull_errno)
         );
         fflush(logfile);
         pthread_mutex_unlock(log_mutex);
