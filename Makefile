@@ -19,9 +19,9 @@ nfs_console: nfs_console.c utils.c
 nfs_client: nfs_client.c utils.c
 	$(CC) $(CFLAGS) -o nfs_client nfs_client.c utils.c -lpthread
 
-#εκτέλεση manager με στανταρ ορίσματα + -n 5 (worker_limit)
+#εκτέλεση manager με στανταρ ορίσματα + -n 3 (worker_limit)
 run: nfs_manager
-	./nfs_manager -l manager_logfile -c config_file -n 5 -p 5000 -b 1024 
+	./nfs_manager -l manager_logfile -c config_file -n 3 -p 5000 -b 1024 
 
 #εκτέλεση console με στανταρ όρισμα
 console: nfs_console

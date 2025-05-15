@@ -745,12 +745,14 @@ int push_file(const char *host, int port, const char *filepath,
 
     if (out_errno) *out_errno = 0;
 
+    //δημιουργία socket TCP
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         if (out_errno) *out_errno = errno;
         return -1;
     }
 
+    //προετοιμασία διεύθυνσης του server
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
@@ -761,6 +763,7 @@ int push_file(const char *host, int port, const char *filepath,
         return -1;
     }
 
+    //σύνδεση
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         int err = errno;
         close(sockfd);
@@ -768,6 +771,7 @@ int push_file(const char *host, int port, const char *filepath,
         return -1;
     }
 
+    //αποστολή εντολής PUSH
     char header[1024];
     int header_len = snprintf(header, sizeof(header), "PUSH %s %d ", filepath, size);
     if (header_len < 0 || header_len >= (int)sizeof(header)) {
@@ -776,6 +780,7 @@ int push_file(const char *host, int port, const char *filepath,
         return -1;
     }
 
+    //πακέτο προς αποστολή:  header + δεδομένα αρχείου
     char *packet = malloc(header_len + size);
     if (!packet) {
         close(sockfd);
@@ -786,6 +791,7 @@ int push_file(const char *host, int port, const char *filepath,
     memcpy(packet, header, header_len);
     memcpy(packet + header_len, data, size);
 
+    //αποστολή πακέτου
     int total_sent = 0;
     while (total_sent < header_len + size) {
         int n = send(sockfd, packet + total_sent, header_len + size - total_sent, 0);
@@ -801,6 +807,7 @@ int push_file(const char *host, int port, const char *filepath,
 
     free(packet);
 
+    //λήψη αποτελέσματος από server (int σε network byte order)
     int result_net;
     if (recv(sockfd, &result_net, sizeof(int), 0) != sizeof(int)) {
         int err = errno;
@@ -811,6 +818,7 @@ int push_file(const char *host, int port, const char *filepath,
 
     close(sockfd);
 
+    //μετατροπή σε host byte order και έλεγχος σφάλματος
     int result = ntohl(result_net);
     if (result & 0x80000000) {
         if (out_errno) *out_errno = result & 0x7FFFFFFF;
@@ -863,21 +871,23 @@ void* worker_thread(void *arg) {
 
     while (1) {
         sync_task task;
-        dequeue_task(q, &task);
+        dequeue_task(q, &task);  //περιμένει σε άδεια ουρά 
 
         if (shutting_down && task.source_path[0] == '\0') {
-            break; 
+            break; //τότε βγαίνει από το loop
         }
 
+        //η τρέχουσα χρονική σήμανση
         time_t now = time(NULL);
         struct tm *tm_info = localtime(&now);
         char timestamp[64];
         strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
 
+        //κλήση απαλοιφής κατάληξης για log
         char *stripped_source = strip_extension(task.source_path);
         char *stripped_target = strip_extension(task.target_path);
 
-        pthread_mutex_lock(&log_mutex);
+        pthread_mutex_lock(&log_mutex); //κλείδωμα για καταγραφή
         fprintf(args->log_fp, "%s Added file: %s@%s:%d -> %s@%s:%d\n",
                 timestamp,
                 stripped_source, task.source_host, task.source_port,
@@ -887,9 +897,10 @@ void* worker_thread(void *arg) {
                timestamp,
                stripped_source, task.source_host, task.source_port,
                stripped_target, task.target_host, task.target_port);
-        pthread_mutex_unlock(&log_mutex);
+        pthread_mutex_unlock(&log_mutex); //ξεκλείδωμα για καταγραφή
 
         process_task_serially(task, args->log_fp, args->log_mutex);
+        //κλήση συνάρτησης συγχρονισμού
     }
 
     return NULL;
@@ -898,35 +909,41 @@ void* worker_thread(void *arg) {
 //συνάρτηση εξόδου από την ουρά εργασιών
 void dequeue_task(task_queue *q, sync_task *task_out) {
     pthread_mutex_lock(&q->mutex);
+    //αν ουρά άδεια και όχι shutdown, περιμένουμε
     while (q->count == 0 && !shutting_down) {
         pthread_cond_wait(&q->not_empty, &q->mutex);
     }
 
+    //αν ουρά άδεια και shutdown
     if (shutting_down && q->count == 0) {
         pthread_mutex_unlock(&q->mutex);
         task_out->source_path[0] = '\0'; 
         return;
     }
 
+    //παίρνω την εργασία από την αρχή
     *task_out = q->tasks[q->front];
     q->front = (q->front + 1) % q->capacity;
     q->count--;
 
+    //ειδοποίηση άλλων νημάτων για χώρο στην ουρά
     pthread_cond_signal(&q->not_full);
     pthread_mutex_unlock(&q->mutex);
 }
 
 //συνάρτηση απαλοιφής κατάληξης
 char *strip_extension(const char *path) {
-    char *path_copy = strdup(path);  
+    char *path_copy = strdup(path); //δημιουργία αντιγράφου 
     if (!path_copy) return NULL;
 
+    //εντοπισμός του τελεύταίου / για να πάρω μόνο όνομα
     char *basename = strrchr(path_copy, '/');
     basename = basename ? basename + 1 : path_copy;
 
+    //εντοπισμός του τελευταίου . 
     char *dot = strrchr(basename, '.');
     if (dot) {
-        *dot = '\0';  
+        *dot = '\0';  //αφαίρεση του .
     }
 
     return path_copy;
@@ -942,21 +959,26 @@ void usage_c(const char *progname) {
 
 //συνάρτηση δημιουργίας socket
 int create_socket(const char *host_ip, int host_port) {
+    //δημιουργία socket
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         perror("socket");
         exit(EXIT_FAILURE);
     }
 
+    //ρύθμιση διεύθυνσης
     struct sockaddr_in server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(host_port);
+    server_addr.sin_port = htons(host_port); //μετατροπή port σε network byte order
+
+    //μετατροπή IP σε binary μορφή
     if (inet_pton(AF_INET, host_ip, &server_addr.sin_addr) <= 0) {
         perror("inet_pton");
         exit(EXIT_FAILURE);
     }
 
+    //σύνδεση
     if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("connect");
         exit(EXIT_FAILURE);
@@ -967,20 +989,23 @@ int create_socket(const char *host_ip, int host_port) {
 
 //συνάρτηση εντολής μέσω γραμμής εντολών
 void command_loop(int sockfd, FILE *logfile) {
-    char line[MAX_LINE_LENGTH];
+    char line[MAX_LINE_LENGTH]; //buffer
   
     while (1) {
         printf("> ");
         fflush(stdout);
 
+        //ανάγνωση γραμής από τον χρήστη
         if (!fgets(line, sizeof(line), stdin)) break;
         line[strcspn(line, "\n")] = '\0';  
 
+        //χρονική σήμανση
         time_t now = time(NULL);
         struct tm *tm_info = localtime(&now);
         char timestamp[64];
         strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", tm_info);
 
+        //εντολή add
         if (strncmp(line, "add ", 4) == 0) {
             char src[MAX_LINE_LENGTH], dst[MAX_LINE_LENGTH];
             if (sscanf(line + 4, "%s %s", src, dst) == 2) {
@@ -988,6 +1013,7 @@ void command_loop(int sockfd, FILE *logfile) {
             } else {
                 fprintf(logfile, "%s Command add (invalid format)\n", timestamp);
             }
+            //εντολή cancel
         } else if (strncmp(line, "cancel ", 7) == 0) {
             char full_path[MAX_LINE_LENGTH];
             if (sscanf(line + 7, "%s", full_path) == 1) {
@@ -1001,19 +1027,22 @@ void command_loop(int sockfd, FILE *logfile) {
             } else {
                 fprintf(logfile, "%s Command cancel (invalid format)\n", timestamp);
             }
+            //εντολή shutdown
         } else if (strncmp(line, "shutdown", 8) == 0) {
             fprintf(logfile, "%s Command shutdown\n", timestamp);
-        } else {
+        } else { //άγνωστη εντολή
             fprintf(logfile, "%s Command %s\n", timestamp, line); 
         }
 
-        fflush(logfile);
+        fflush(logfile); //άμεση καταγραφή 
 
+        //αποστολή εντολής
         if (send(sockfd, line, strlen(line), 0) < 0) {
             perror("send");
             break;
         }
 
+        //απάντηση
         char response[MAX_LINE_LENGTH * 2];
         int n = recv(sockfd, response, sizeof(response) - 1, 0);
         if (n <= 0) {
@@ -1021,8 +1050,9 @@ void command_loop(int sockfd, FILE *logfile) {
             break;
         }
         response[n] = '\0';
-        printf("%s", response);
+        printf("%s", response); //εκτύπωση στην οθόνη
 
+        //σε περίπτωση που δοθεί shutdown
         if (strncmp(line, "shutdown", 8) == 0)
             break;
     }
@@ -1034,23 +1064,27 @@ void command_loop(int sockfd, FILE *logfile) {
 /*--------------------------------------------   NFS_CLIENT  -----------------------------------------------*/
 //συνάρτηση εκκίνησης socket
 int start_server_socket(int port) {
+    //δημιουργία TCP socket
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         perror("socket");
         exit(EXIT_FAILURE);
     }
 
+    //προετοιμασία διεύθυνσης
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
+    //δέσμευση
     if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("bind");
         exit(EXIT_FAILURE);
     }
 
+    //ακρόαση
     if (listen(sockfd, 5) < 0) {
         perror("listen");
         exit(EXIT_FAILURE);
@@ -1072,64 +1106,78 @@ void *handle_client_thread(void *arg) {
 
 //συνάρτηση διαχείρισης εντολών manager (κύρια)
 void handle_client(int client_fd) {
-    char buffer[MAX_LINE_LENGTH];
+    char buffer[MAX_LINE_LENGTH]; //buffer
+    //λήψη δεδομένων από το socket
     int bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
     if (bytes <= 0) return;
 
-    buffer[bytes] = '\0';
+    buffer[bytes] = '\0'; //τερματισμός string
 
+    //εντολή LIST <dir_path>
     if (strncmp(buffer, "LIST ", 5) == 0) {
         char *dir_path = buffer + 5;
-        dir_path[strcspn(dir_path, "\r\n")] = '\0';
-        DIR *dir = opendir(strip_leading_slash(dir_path));
+        dir_path[strcspn(dir_path, "\r\n")] = '\0'; //αφαίρεση newline
+
+        //άνοιγμα καταλόγου και περικοπή
+        DIR *dir = opendir(strip_leading_slash(dir_path)); 
         if (!dir) {
             perror("opendir");
-            send(client_fd, ".\n", 2, 0);
+            send(client_fd, ".\n", 2, 0); //σήμα τερματισμού
             return;
         }
 
         struct dirent *entry;
         while ((entry = readdir(dir)) != NULL) {
-            if (entry->d_type == DT_REG) {
+            if (entry->d_type == DT_REG) {  //μόνο κανονικά αρχεία
                 send(client_fd, entry->d_name, strlen(entry->d_name), 0);
                 send(client_fd, "\n", 1, 0);
             }
         }
-        send(client_fd, ".\n", 2, 0);
+        send(client_fd, ".\n", 2, 0);  //σήμα τερματισμού λίστας
         closedir(dir);
     }
 
+    //εντολή PULL <filepath>
     else if (strncmp(buffer, "PULL ", 5) == 0) {
         char *filepath = buffer + 5;
-        filepath[strcspn(filepath, "\n")] = '\0';
+        filepath[strcspn(filepath, "\n")] = '\0'; //αφαίρεση newline
+        //κλήση συνάρτησης διαχείρισης PULL
         handle_pull(client_fd, strip_leading_slash(filepath));
     }
 
+    //εντολή PUSH <filepath> <size> <data>
     else if (strncmp(buffer, "PUSH ", 5) == 0) {
         char filepath[1024];
         int chunk_size;
 
+        //εντοπισμός ορίων μεταξύ filepath, chunk_size και data
         char *after_cmd = buffer + 5;
         char *first_space = strchr(after_cmd, ' ');
         if (!first_space) return;
         char *second_space = strchr(first_space + 1, ' ');
         if (!second_space) return;
 
-        *second_space = '\0';  
+        *second_space = '\0';   //τερματισμός chunk_size string
 
+        //αντιγραφή filepath
         strncpy(filepath, after_cmd, first_space - after_cmd);
         filepath[first_space - after_cmd] = '\0';
 
+        //μετατροπή chunk_size σε int
         chunk_size = atoi(first_space + 1);
 
+        //εντοπισμός αρχής δεδομένων στο buffer
         char *data_start = second_space + 1;
-        int data_in_buffer = bytes - (data_start - buffer);
+        int data_in_buffer = bytes - (data_start - buffer); //πόσα δεδομένα διαβάσαμε ήδη
 
+        //δέσμευση μνήμης για τα πλήρη δεδομένα
         char *chunk_data = malloc(chunk_size);
         if (!chunk_data) return;
 
+        //αντιγραφή ήδη ληφθέντων δεδομένων
         memcpy(chunk_data, data_start, data_in_buffer);
 
+        //αν δεν έχουμε όλο το chunk, συνεχίζουμε να διαβάζουμε
         int total_read = data_in_buffer;
         while (total_read < chunk_size) {
             int n = recv(client_fd, chunk_data + total_read, chunk_size - total_read, 0);
@@ -1139,7 +1187,7 @@ void handle_client(int client_fd) {
             }
             total_read += n;
         }
-
+        //κλήση συνάρτησης διαχείρισης PUSH
         handle_push(client_fd, strip_leading_slash(filepath), chunk_size, chunk_data);
         free(chunk_data);
     }
@@ -1147,8 +1195,10 @@ void handle_client(int client_fd) {
 
 //συνάρτηση διαχειρισης εντολής PULL
 int handle_pull(int client_fd, const char *filepath) {
+    //άνοιγμα αρχείου για ανάγνωση
     int fd = open(filepath, O_RDONLY);
     if (fd < 0) {
+        //περίπτωση αποτυχίας
         char msg[512];
         snprintf(msg, sizeof(msg), "-1 Failed to open file: %s\n", strerror(errno));
         send(client_fd, msg, strlen(msg), 0);
@@ -1156,6 +1206,7 @@ int handle_pull(int client_fd, const char *filepath) {
         return -1;
     }
 
+    //βρίσκω μέγεθος και πάω την ακίδα στο τέλος
     off_t filesize = lseek(fd, 0, SEEK_END);
     if (filesize < 0) {
         char msg[512];
@@ -1166,6 +1217,7 @@ int handle_pull(int client_fd, const char *filepath) {
         return -1;
     }
 
+    //επιστρέφω στην αρχή για ανάγνωση
     if (lseek(fd, 0, SEEK_SET) < 0) {
         char msg[512];
         snprintf(msg, sizeof(msg), "-1 Failed to rewind file: %s\n", strerror(errno));
@@ -1175,6 +1227,7 @@ int handle_pull(int client_fd, const char *filepath) {
         return -1;
     }
 
+    //αποστολή header με το μέγεθος του αρχείου
     char header[64];
     int header_len = snprintf(header, sizeof(header), "%ld ", (long)filesize);
     if (send(client_fd, header, header_len, 0) != header_len) {
@@ -1183,6 +1236,7 @@ int handle_pull(int client_fd, const char *filepath) {
         return -1;
     }
 
+    //αποστολή περιεχομένων αρχείου σε chunks των 4096 bytes
     char buffer[4096];
     ssize_t n;
     while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
@@ -1193,7 +1247,7 @@ int handle_pull(int client_fd, const char *filepath) {
         }
     }
 
-    if (n < 0) {
+    if (n < 0) { //έλεγχος για σφάλμα
         perror("read (file)");
         close(fd);
         return -1;
@@ -1207,27 +1261,30 @@ int handle_pull(int client_fd, const char *filepath) {
 int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data) {
     int fd;
 
+    //αν -1 τότε δημιουργία/εκκίνηση νέου
     if (chunk_size == -1) {
         fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd == -1) {
-            int err = htonl(0x80000000 | errno);
+            int err = htonl(0x80000000 | errno); //κωδικοποίηση σφάλαμτος
             send(client_fd, &err, sizeof(int), 0);
             perror("open create");
             return -1;
         }
         close(fd);
 
-        int ok = htonl(0);
+        int ok = htonl(0); //επιτυχία
         send(client_fd, &ok, sizeof(int), 0);
         return 0;
     }
 
+    //αν μηδέν τιποτα
     if (chunk_size == 0) {
         int ok = htonl(0);
         send(client_fd, &ok, sizeof(int), 0);
         return 0;
     }
 
+    //γράφω με append
     fd = open(filepath, O_WRONLY | O_APPEND, 0644);
     if (fd == -1) {
         int err = htonl(0x80000000 | errno);
@@ -1236,6 +1293,7 @@ int handle_push(int client_fd, const char *filepath, int chunk_size, const char 
         return -1;
     }
 
+    //εγγραφή δεδομένων
     ssize_t written = write(fd, data, chunk_size);
     if (written != chunk_size) {
         int err = htonl(0x80000000 | EIO);
