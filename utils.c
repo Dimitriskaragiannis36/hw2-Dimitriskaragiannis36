@@ -1,25 +1,29 @@
-#include "utils.h"
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <unistd.h>
-#include <time.h>
-#include <fcntl.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <errno.h>
-#include <sys/stat.h>
+#include "utils.h" //η βιβλιοθήκη που έφτιαξα
+#include <stdlib.h> //για free
+#include <string.h> //για strcpy
+#include <sys/socket.h> //για socket
+#include <arpa/inet.h> //για htons
+#include <netinet/in.h>  //για struct sockaddr_in
+#include <unistd.h> //για read, write
+#include <time.h> //για strftime
+#include <fcntl.h> //για O_APPEND
+#include <dirent.h> //για opendir
+#include <pthread.h> //για pthread_mutex_t
+#include <errno.h> //για errno, EINTR
+#include <sys/stat.h>  //για stat
 
-FILE *global_log_fp = NULL;
-pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+FILE *global_log_fp = NULL; //αρχικοποίηση global pointer του manager_logfile
+pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER; //αρχικοποίηση mytex
 
+
+/*--------------------------------------------   NFS_MANAGER  -----------------------------------------------*/
+//συνάρτηση σφάλματος
 void usage_m(const char *prog_name) {
     fprintf(stderr, "Usage: %s -l <manager_logfile> -c <config_file> -n <worker_limit> -p <port_number> -b <bufferSize>\n", prog_name);
     exit(EXIT_FAILURE);
 }
 
+//συνάρτηση για διάβασμα από config
 void read_config_file(const char *filename, FILE *log_fp, sync_info_mem_store *store) {
     FILE *fp = fopen(filename, "r");
     if (!fp) {
@@ -30,14 +34,16 @@ void read_config_file(const char *filename, FILE *log_fp, sync_info_mem_store *s
     char src_entry[MAX_LINE_LENGTH];
     char tgt_entry[MAX_LINE_LENGTH];
 
+    //διάβασμα κάθε γραμμής που περιέχει ζεύγη source και target
     while (fscanf(fp, "%s %s", src_entry, tgt_entry) == 2) {
         sync_info_mem *info = malloc(sizeof(sync_info_mem));
         if (!info) {
             perror("malloc");
             exit(EXIT_FAILURE);
         }
-        memset(info, 0, sizeof(sync_info_mem));
+        memset(info, 0, sizeof(sync_info_mem)); //μηδενισμός πεδίων
 
+        //ανάλυση source entry 
         char *at = strchr(src_entry, '@');
         char *colon = strchr(src_entry, ':');
         if (!at || !colon || at > colon) {
@@ -51,6 +57,7 @@ void read_config_file(const char *filename, FILE *log_fp, sync_info_mem_store *s
         strncpy(info->source_host, at + 1, MAX_HOST_LENGTH);
         info->source_port = atoi(colon + 1);
 
+        //ανάλυση target entry 
         at = strchr(tgt_entry, '@');
         colon = strchr(tgt_entry, ':');
         if (!at || !colon || at > colon) {
@@ -68,81 +75,20 @@ void read_config_file(const char *filename, FILE *log_fp, sync_info_mem_store *s
         info->error_count = 0;
         info->last_sync_time = 0;
 
-        add_sync_info(store, info);
+        add_sync_info(store, info); //κλήση συνάρτησης για προσθήκη στη λίστα
     }
 
     fclose(fp);
 }
 
-
-void add_sync_info(sync_info_mem_store *store, sync_info_mem *info) {
-    info->next = store->head;
-    store->head = info;
-    store->size++;
-}
-
-sync_info_mem* find_sync_info(sync_info_mem_store *store, const char *source_dir) {
-    sync_info_mem *current = store->head;
-    while (current) {
-        if (strcmp(current->source_dir, source_dir) == 0) {
-            return current;
-        }
-        current = current->next;
-    }
-    return NULL;
-}
-
-void free_sync_info_store(sync_info_mem_store *store) {
-    sync_info_mem *current = store->head;
-    while (current) {
-        sync_info_mem *next = current->next;
-        free(current);
-        current = next;
-    }
-    store->head = NULL;
-    store->size = 0;
-}
-
-int create_server_socket(int port) {
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
-
-    int optval = 1;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
-        perror("setsockopt");
-        close(sockfd);
-        exit(EXIT_FAILURE);
-    }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("bind");
-        close(sockfd);
-        exit(EXIT_FAILURE);
-    }
-
-    if (listen(sockfd, 5) < 0) {
-        perror("listen");
-        close(sockfd);
-        exit(EXIT_FAILURE);
-    }
-
-    return sockfd;
-}
+//συνάρτηση διαχείρισης εντολής από console
 int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, pthread_mutex_t *log_mutex) {
     char buffer[MAX_LINE_LENGTH];
     char response[MAX_LINE_LENGTH];
     int shutdown_requested = 0;
 
     while (1) {
+        //ανάγνωση εντολής από socket
         int bytes = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
         if (bytes <= 0) {
             if (bytes == 0) {
@@ -155,14 +101,15 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
             break; 
         }
 
-        buffer[bytes] = '\0';
+        buffer[bytes] = '\0';  //null-terminate
 
         char timestamp[64];
         time_t now = time(NULL);
         strftime(timestamp, sizeof(timestamp), "[%Y-%m-%d %H:%M:%S]", localtime(&now));
 
-        response[0] = '\0';  
+        response[0] = '\0';  //καθαρισμός response
 
+        //εντολή shutdown
         if (strncmp(buffer, "shutdown", 8) == 0) {
             snprintf(response, sizeof(response),
                      "%s Shutting down manager...\n"
@@ -176,6 +123,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
             shutdown_requested = 1;
         }
 
+        //εντολή add <source> <target>
         else if (strncmp(buffer, "add ", 4) == 0) {
             char src_full[MAX_LINE_LENGTH], dst_full[MAX_LINE_LENGTH];
             if (sscanf(buffer + 4, "%1023s %1023s", src_full, dst_full) == 2) {
@@ -184,6 +132,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                 char dst_dir[MAX_DIR_LENGTH], dst_host[MAX_HOST_LENGTH];
                 int dst_port;
 
+                //parsing source
                 char *at = strchr(src_full, '@');
                 char *colon = strrchr(src_full, ':');
                 if (!at || !colon || at > colon) {
@@ -195,6 +144,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                     src_port = atoi(colon + 1);
                 }
 
+                // parsing target
                 at = strchr(dst_full, '@');
                 colon = strrchr(dst_full, ':');
                 if (!at || !colon || at > colon) {
@@ -206,12 +156,14 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                     dst_port = atoi(colon + 1);
                 }
 
+                //έλεγχος αν υπάρχει ήδη το source
                 sync_info_mem *existing_info = find_sync_info(store, src_dir);
                 if (existing_info && existing_info->active) {
                     snprintf(response, sizeof(response), "%s Already in queue: %.900s\n", timestamp, src_dir);
                     printf("%s", response);
                     fflush(stdout);
                 } else {
+                    //δημιουργία νέου sync entry
                     sync_info_mem *info = malloc(sizeof(sync_info_mem));
                     if (info) {
                         memset(info, 0, sizeof(sync_info_mem));
@@ -227,8 +179,9 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                         info->error_count = 0;
                         info->last_sync_time = 0;
 
-                        add_sync_info(store, info);
+                        add_sync_info(store, info); //κλήση συνάρτησης προσθήκης
 
+                        //ανίχνευση αρχείων στον source κατάλογο
                         DIR *dir = opendir(strip_leading_slash(src_dir));
                         if (dir == NULL) {
                             snprintf(response, sizeof(response), "%s Cannot open directory: %s\n", timestamp, src_dir);
@@ -246,6 +199,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                                         *dot = '\0';
                                     }
 
+                                    //κατασκευή source/target path για log
                                     char log_src_path[MAX_PATH_LENGTH];
                                     char log_dst_path[MAX_PATH_LENGTH];
                                     snprintf(log_src_path, sizeof(log_src_path), "%s/%s", src_dir, filename_no_ext);
@@ -255,7 +209,8 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                                             timestamp, log_src_path, src_host, src_port,
                                             log_dst_path, dst_host, dst_port);
                                     fflush(logfile);
-
+                                    
+                                    //εκτύπωση στην οθόνη
                                     char line[512];
                                     int len = snprintf(line, sizeof(line), "%s Added file: %s@%s:%d -> %s@%s:%d\n",
                                                     timestamp, log_src_path, src_host, src_port,
@@ -267,7 +222,8 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                                         line[sizeof(line) - 1] = '\0';  
                                     }
                                     strncat(response, line, sizeof(response) - strlen(response) - 1);
-
+                                    
+                                    //δημιουργία και επεξεργασία του sync task
                                     char src_path[MAX_PATH_LENGTH];
                                     char dst_path[MAX_PATH_LENGTH];
                                     snprintf(src_path, sizeof(src_path), "%s/%s", src_dir, entry->d_name);
@@ -295,7 +251,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                 snprintf(response, sizeof(response), "%s Invalid add command format.\n", timestamp);
             }
         }
-
+        //εντολή cancel <source>
         else if (strncmp(buffer, "cancel ", 7) == 0) {
             char src[256];
             if (sscanf(buffer + 7, "%1023s", src) == 1) {
@@ -304,6 +260,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                 int any_inactive_found = 0;
                 response[0] = '\0';
 
+                //προχωράει μέχρι να το βρει
                 while (curr) {
                     if (strcmp(curr->source_dir, src) == 0) {
                         if (curr->active) {
@@ -334,6 +291,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                     curr = curr->next;
                 }
 
+                //ακόμα και αν δεν έχει προστεθεί εξαρχής
                 if (!any_active_found && !any_inactive_found) {
                     snprintf(response, sizeof(response),
                      "%s Directory not being synchronized: %s\n", timestamp, src);
@@ -350,7 +308,7 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
            snprintf(response, sizeof(response), "%s Unknown command: %.500s\n", timestamp, buffer);
         }
 
-        send(client_sock, response, strlen(response), 0);
+        send(client_sock, response, strlen(response), 0); //στέλνει στον console
 
         if (shutdown_requested)
             break;
@@ -361,7 +319,274 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
     return shutdown_requested;
 }
 
+//συνάρτηση προσθήκης στην δομή
+void add_sync_info(sync_info_mem_store *store, sync_info_mem *info) {
+    info->next = store->head;
+    store->head = info;
+    store->size++;
+}
 
+//συνάρτηση αναζήτησης στην δομή
+sync_info_mem* find_sync_info(sync_info_mem_store *store, const char *source_dir) {
+    sync_info_mem *current = store->head;
+    while (current) { //όταν το βρει
+        if (strcmp(current->source_dir, source_dir) == 0) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+//συνάρτηση καθαρισμού δομής
+void free_sync_info_store(sync_info_mem_store *store) {
+    sync_info_mem *current = store->head;
+    while (current) { //προχωρά στο επόμενο
+        sync_info_mem *next = current->next;
+        free(current);
+        current = next;
+    }
+    store->head = NULL;
+    store->size = 0;
+}
+
+//συνάρτηση δημιουργίας socket
+int create_server_socket(int port) {
+    //δημιουργία socket
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    //ρύθμιση για επαναχρησιμοποίηση του port
+    int optval = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        perror("setsockopt");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    //ορισμός διεύθυνσης socket
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port); //μετατροπή σε network byte order
+    addr.sin_addr.s_addr = INADDR_ANY; //σε οποιαδήποτε
+
+    //σύνδεση socket
+    if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    //ακρόαση socket
+    if (listen(sockfd, 5) < 0) {
+        perror("listen");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    return sockfd;
+}
+
+//συνάρτηση αποστολής LIST και εισαγωγής των εργασιών στην ουρά (βοηθητική)
+void send_list_and_enqueue_tasks(sync_info_mem_store *store, task_queue *queue, FILE *logfile) {
+    sync_info_mem *curr = store->head;
+    while (curr) {
+        send_list_and_enqueue(curr, queue, logfile);
+        curr = curr->next;
+    }
+}
+
+//συνάρτηση αποστολής LIST και εισαγωγής των εργασιών στην ουρά (κύρια)
+int send_list_and_enqueue(sync_info_mem *entry, task_queue *queue, FILE *logfile) {
+    //δημιουργία σύνδεσης με client
+    int sockfd = connect_to_client(entry->source_host, entry->source_port);
+    if (sockfd < 0) {
+        fprintf(logfile, "Failed to connect to %s:%d\n", entry->source_host, entry->source_port);
+        return -1;
+    }
+
+    //αποστολή εντολής LIST
+    char command[1024];
+    snprintf(command, sizeof(command), "LIST %s\n", entry->source_dir);
+    if (send(sockfd, command, strlen(command), 0) < 0) {
+        perror("send");
+        close(sockfd);
+        return -1;
+    }
+
+    //άνοιγμα stream για ανάγνωση της απάντησης
+    FILE *sock_stream = fdopen(sockfd, "r");
+    if (!sock_stream) {
+        perror("fdopen");
+        close(sockfd);
+        return -1;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), sock_stream)) {
+        line[strcspn(line, "\n")] = '\0'; //αφαίρεση newline
+        if (strcmp(line, ".") == 0) break; //τέλος λίστας
+
+        //σε περίπτωση cancel
+        if (!entry->active) {
+            fprintf(logfile, "Task skipped due to cancellation of %s\n", entry->source_dir);
+            break;
+        }
+
+        //δημιουργία δομής εργασίας
+        sync_task task;
+        if (snprintf(task.source_path, MAX_PATH_LENGTH, "%s/%s", entry->source_dir, line) >= MAX_PATH_LENGTH) {
+            fprintf(logfile, "snprintf truncated source path\n");
+            continue;
+        }
+
+        if (snprintf(task.target_path, MAX_PATH_LENGTH, "%s/%s", entry->target_dir, line) >= MAX_PATH_LENGTH) {
+            fprintf(logfile, "snprintf truncated source path\n");
+            continue;
+        }
+
+        //αντιγραφή υπόλοιπων πεδίων 
+        strncpy(task.source_host, entry->source_host, MAX_HOST_LENGTH);
+        strncpy(task.target_host, entry->target_host, MAX_HOST_LENGTH);
+        task.source_port = entry->source_port;
+        task.target_port = entry->target_port;
+        task.parent_entry = entry;
+
+        //προσθήκη εργασίας στην ουρά
+        enqueue_task(queue, &task);
+    }
+
+    //κλείσιμο stream και socket
+    fclose(sock_stream);  
+    return 0;
+}
+
+//συνάρτηση σύνδεσης με τον client
+int connect_to_client(const char *ip, int port) {
+    //δημιουργία socket
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
+        return -1;
+    }
+
+    //προετοιμασία δομής διεύθυνσης server
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(port);
+
+    //μετατροπή IP από string σε binary μορφή
+    if (inet_pton(AF_INET, ip, &serv_addr.sin_addr) <= 0) {
+        perror("inet_pton");
+        close(sockfd);
+        return -1;
+    }
+
+    //σύνδεση στον server
+    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        perror("connect");
+        close(sockfd);
+        return -1;
+    }
+
+    return sockfd;
+}
+
+//συνάρτηση εργασιών συγχρονισμού
+void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_mutex) {
+    char *file_data = NULL;
+    int file_size = 0;
+
+    //χρονική σήμανση για log
+    char timestamp[64];
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
+    //παίρνω το pthread id
+    pthread_t thread_pid = pthread_self();
+
+    //αφαιρώ τις καταλήξεις
+    char *source_no_ext = strip_extension(task.source_path);
+    char *target_no_ext = strip_extension(task.target_path);
+    int pull_errno = 0;
+
+    //εκτέλεση PULL εντολής
+    if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size, &pull_errno) == 0) {
+        pthread_mutex_lock(log_mutex);  //κλειδώννω για καταγραφή  
+        fprintf(logfile,
+            "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PULL] [SUCCESS] [%d bytes pulled]\n",
+            timestamp,
+            source_no_ext, task.source_host, task.source_port,
+            target_no_ext, task.target_host, task.target_port,
+            (long)thread_pid, file_size
+        );
+        fflush(logfile);
+        pthread_mutex_unlock(log_mutex); //ξεκλειδώνω για καταγραφή
+
+        //εκτέλεση PUSH εντολής
+        int push_errno = 0;
+        if (push_file(task.target_host, task.target_port, task.target_path, file_data, file_size, &push_errno) == 0) {
+            now = time(NULL);
+            tm_info = localtime(&now);
+            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
+            pthread_mutex_lock(log_mutex); //κλειδώννω για καταγραφή 
+            fprintf(logfile,
+                "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PUSH] [SUCCESS] [%d bytes pushed]\n",
+                timestamp,
+                source_no_ext, task.source_host, task.source_port,
+                target_no_ext, task.target_host, task.target_port,
+                (long)thread_pid, file_size
+            );
+            fflush(logfile);
+            pthread_mutex_unlock(log_mutex); //ξεκλειδώνω για καταγραφή
+        } else {
+            //αν αποτύχει το PUSH
+            const char *filename = strrchr(task.target_path, '/');
+            filename = filename ? filename + 1 : task.target_path;
+
+            now = time(NULL);
+            tm_info = localtime(&now);
+            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
+            pthread_mutex_lock(log_mutex); //κλειδώννω για καταγραφή
+            fprintf(logfile,
+                "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PUSH] [ERROR] [File: %s - %s]\n",
+                timestamp,
+                source_no_ext, task.source_host, task.source_port,
+                target_no_ext, task.target_host, task.target_port,
+                (long)thread_pid, filename, strerror(push_errno)
+            );
+            fflush(logfile);
+            pthread_mutex_unlock(log_mutex); //ξεκλειδώνω για καταγραφή
+        }
+
+        free(file_data);
+    } else {
+        //αν αποτύχει το PULL
+        const char *filename = strrchr(task.source_path, '/');
+        filename = filename ? filename + 1 : task.source_path;
+
+        pthread_mutex_lock(log_mutex);  //κλειδώννω για καταγραφή
+        fprintf(logfile,
+            "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PULL] [ERROR] [File: %s - %s]\n",
+            timestamp,
+            source_no_ext, task.source_host, task.source_port,
+            target_no_ext, task.target_host, task.target_port,
+            (long)thread_pid, filename, strerror(pull_errno)
+        );
+        fflush(logfile);
+        pthread_mutex_unlock(log_mutex);  //ξεκλειδώνω για καταγραφή
+    }
+}
+
+//συνάρτηση υλοποίησης PULL
 int pull_file(const char *host, int port, const char *filepath,
               char **out_data, int *out_size, int *out_errno) {
     int sockfd;
@@ -371,6 +596,7 @@ int pull_file(const char *host, int port, const char *filepath,
     *out_size = 0;
     if (out_errno) *out_errno = 0;
 
+    //δημιουργία socket και σύνδεση
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         if (out_errno) *out_errno = errno;
@@ -388,6 +614,7 @@ int pull_file(const char *host, int port, const char *filepath,
         return -1;
     }
 
+    //σύνδεση
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         int err = errno;
         close(sockfd);
@@ -395,6 +622,7 @@ int pull_file(const char *host, int port, const char *filepath,
         return -1;
     }
 
+    //αποστολή εντολής PULL
     char msg[1024];
     int msg_len = snprintf(msg, sizeof(msg), "PULL %s\n", filepath);
     if (msg_len < 0 || msg_len >= (int)sizeof(msg)) {
@@ -409,13 +637,14 @@ int pull_file(const char *host, int port, const char *filepath,
         return -1;
     }
 
+    //ανάγνωση αρχείου
     char header[64];  
     int header_pos = 0;
     char c;
 
     while (header_pos < (int)sizeof(header) - 1) {
         int n = recv(sockfd, &c, 1, 0);
-        if (n <= 0) {
+        if (n <= 0) {       //αν κλείσει
             if (out_errno) *out_errno = (n == 0 ? ECONNRESET : errno);
             close(sockfd);
             return -1;
@@ -427,7 +656,7 @@ int pull_file(const char *host, int port, const char *filepath,
     header[header_pos] = '\0';
     int filesize = atoi(header);
 
-    if (filesize == -1) {
+    if (filesize == -1) { //αν μέγεθος -1 σφάλμα
 
         char *errbuf = malloc(1024);
         if (!errbuf) {
@@ -457,7 +686,8 @@ int pull_file(const char *host, int port, const char *filepath,
 
         errbuf[len] = '\0';
         fprintf(stderr, "Server error: %s\n", errbuf);
-      
+        
+        //μετατροπή μηνύματος σε κωδικό errno
         if (out_errno) {
             if (strstr(errbuf, "Permission denied")) *out_errno = EACCES;
             else if (strstr(errbuf, "No such file or directory")) *out_errno = ENOENT;
@@ -480,6 +710,7 @@ int pull_file(const char *host, int port, const char *filepath,
         return -1;
     }
 
+    //ανάγνωση των δεδομένων του αρχείου
     char *data = malloc(filesize);
     if (!data) {
         if (out_errno) *out_errno = ENOMEM;
@@ -506,8 +737,7 @@ int pull_file(const char *host, int port, const char *filepath,
     return 0;
 }
 
-
-
+//συνάρτηση υλοποίησης PUSH
 int push_file(const char *host, int port, const char *filepath,
               const char *data, int size, int *out_errno) {
     int sockfd;
@@ -590,9 +820,7 @@ int push_file(const char *host, int port, const char *filepath,
     return 0;
 }
 
-
-
-
+//συνάρτηση αρχικοποίησης ουράς εργασιών
 void init_task_queue(task_queue *q, int capacity) {
     q->capacity = capacity;
     q->count = 0;
@@ -605,6 +833,7 @@ void init_task_queue(task_queue *q, int capacity) {
     pthread_cond_init(&q->not_empty, NULL);
 }
 
+//συνάρτηση καταστροφής ουράς εργασιών
 void destroy_task_queue(task_queue *q) {
     free(q->tasks);
     pthread_mutex_destroy(&q->mutex);
@@ -612,6 +841,7 @@ void destroy_task_queue(task_queue *q) {
     pthread_cond_destroy(&q->not_empty);
 }
 
+//συνάρτησης εισόδου στην ουρά εργασιών
 void enqueue_task(task_queue *q, sync_task *task) {
     pthread_mutex_lock(&q->mutex);
     while (q->count == q->capacity) {
@@ -626,27 +856,7 @@ void enqueue_task(task_queue *q, sync_task *task) {
     pthread_mutex_unlock(&q->mutex);
 }
 
-void dequeue_task(task_queue *q, sync_task *task_out) {
-    pthread_mutex_lock(&q->mutex);
-    while (q->count == 0 && !shutting_down) {
-        pthread_cond_wait(&q->not_empty, &q->mutex);
-    }
-
-    if (shutting_down && q->count == 0) {
-        pthread_mutex_unlock(&q->mutex);
-        task_out->source_path[0] = '\0'; 
-        return;
-    }
-
-    *task_out = q->tasks[q->front];
-    q->front = (q->front + 1) % q->capacity;
-    q->count--;
-
-    pthread_cond_signal(&q->not_full);
-    pthread_mutex_unlock(&q->mutex);
-}
-
-
+//πολυνηματική συνάρτηση των workers
 void* worker_thread(void *arg) {
     worker_args *args = (worker_args*) arg;
     task_queue *q = args->queue;
@@ -685,79 +895,52 @@ void* worker_thread(void *arg) {
     return NULL;
 }
 
-
-void send_list_and_enqueue_tasks(sync_info_mem_store *store, task_queue *queue, FILE *logfile) {
-    sync_info_mem *curr = store->head;
-    while (curr) {
-        send_list_and_enqueue(curr, queue, logfile);
-        curr = curr->next;
+//συνάρτηση εξόδου από την ουρά εργασιών
+void dequeue_task(task_queue *q, sync_task *task_out) {
+    pthread_mutex_lock(&q->mutex);
+    while (q->count == 0 && !shutting_down) {
+        pthread_cond_wait(&q->not_empty, &q->mutex);
     }
+
+    if (shutting_down && q->count == 0) {
+        pthread_mutex_unlock(&q->mutex);
+        task_out->source_path[0] = '\0'; 
+        return;
+    }
+
+    *task_out = q->tasks[q->front];
+    q->front = (q->front + 1) % q->capacity;
+    q->count--;
+
+    pthread_cond_signal(&q->not_full);
+    pthread_mutex_unlock(&q->mutex);
 }
 
-int send_list_and_enqueue(sync_info_mem *entry, task_queue *queue, FILE *logfile) {
-    int sockfd = connect_to_client(entry->source_host, entry->source_port);
-    if (sockfd < 0) {
-        fprintf(logfile, "Failed to connect to %s:%d\n", entry->source_host, entry->source_port);
-        return -1;
+//συνάρτηση απαλοιφής κατάληξης
+char *strip_extension(const char *path) {
+    char *path_copy = strdup(path);  
+    if (!path_copy) return NULL;
+
+    char *basename = strrchr(path_copy, '/');
+    basename = basename ? basename + 1 : path_copy;
+
+    char *dot = strrchr(basename, '.');
+    if (dot) {
+        *dot = '\0';  
     }
 
-    char command[1024];
-    snprintf(command, sizeof(command), "LIST %s\n", entry->source_dir);
-    if (send(sockfd, command, strlen(command), 0) < 0) {
-        perror("send");
-        close(sockfd);
-        return -1;
-    }
-
-    FILE *sock_stream = fdopen(sockfd, "r");
-    if (!sock_stream) {
-        perror("fdopen");
-        close(sockfd);
-        return -1;
-    }
-
-    char line[1024];
-    while (fgets(line, sizeof(line), sock_stream)) {
-        line[strcspn(line, "\n")] = '\0';
-        if (strcmp(line, ".") == 0) break;
-
-        if (!entry->active) {
-            fprintf(logfile, "Task skipped due to cancellation of %s\n", entry->source_dir);
-            break;
-        }
-
-        sync_task task;
-        if (snprintf(task.source_path, MAX_PATH_LENGTH, "%s/%s", entry->source_dir, line) >= MAX_PATH_LENGTH) {
-            fprintf(logfile, "snprintf truncated source path\n");
-            continue;
-        }
-
-        if (snprintf(task.target_path, MAX_PATH_LENGTH, "%s/%s", entry->target_dir, line) >= MAX_PATH_LENGTH) {
-            fprintf(logfile, "snprintf truncated source path\n");
-            continue;
-        }
-
-        strncpy(task.source_host, entry->source_host, MAX_HOST_LENGTH);
-        strncpy(task.target_host, entry->target_host, MAX_HOST_LENGTH);
-        task.source_port = entry->source_port;
-        task.target_port = entry->target_port;
-        task.parent_entry = entry;
-
-        enqueue_task(queue, &task);
-    }
-
-    fclose(sock_stream);  
-    return 0;
+    return path_copy;
 }
 
 
-
-
+/*--------------------------------------------   NFS_CONSOLE  -----------------------------------------------*/
+//συνάρτηση σφάλματος
 void usage_c(const char *progname) {
     fprintf(stderr, "Usage: %s -l <console-logfile> -h <host_IP> -p <host_port>\n", progname);
     exit(EXIT_FAILURE);
 }
 
+//συνάρτηση δημιουργίας socket
 int create_socket(const char *host_ip, int host_port) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
@@ -782,6 +965,7 @@ int create_socket(const char *host_ip, int host_port) {
     return sockfd;
 }
 
+//συνάρτηση εντολής μέσω γραμμής εντολών
 void command_loop(int sockfd, FILE *logfile) {
     char line[MAX_LINE_LENGTH];
   
@@ -847,7 +1031,8 @@ void command_loop(int sockfd, FILE *logfile) {
 
 
 
-
+/*--------------------------------------------   NFS_CLIENT  -----------------------------------------------*/
+//συνάρτηση εκκίνησης socket
 int start_server_socket(int port) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
@@ -874,6 +1059,18 @@ int start_server_socket(int port) {
     return sockfd;
 }
 
+//πολυνηματική συνάρτηση διαχείρισης εντολών manager (βοηθητική)
+void *handle_client_thread(void *arg) {
+    int client_fd = *(int *)arg;
+    free(arg);
+
+    handle_client(client_fd);
+    close(client_fd);
+
+    return NULL;
+}
+
+//συνάρτηση διαχείρισης εντολών manager (κύρια)
 void handle_client(int client_fd) {
     char buffer[MAX_LINE_LENGTH];
     int bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
@@ -948,43 +1145,7 @@ void handle_client(int client_fd) {
     }
 }
 
-void *handle_client_thread(void *arg) {
-    int client_fd = *(int *)arg;
-    free(arg);
-
-    handle_client(client_fd);
-    close(client_fd);
-
-    return NULL;
-}
-
-int connect_to_client(const char *ip, int port) {
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        perror("socket");
-        return -1;
-    }
-
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-
-    if (inet_pton(AF_INET, ip, &serv_addr.sin_addr) <= 0) {
-        perror("inet_pton");
-        close(sockfd);
-        return -1;
-    }
-
-    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("connect");
-        close(sockfd);
-        return -1;
-    }
-
-    return sockfd;
-}
-
+//συνάρτηση διαχειρισης εντολής PULL
 int handle_pull(int client_fd, const char *filepath) {
     int fd = open(filepath, O_RDONLY);
     if (fd < 0) {
@@ -1042,6 +1203,7 @@ int handle_pull(int client_fd, const char *filepath) {
     return 0;
 }
 
+//συνάρτηση διαχειρισης εντολής PUSH
 int handle_push(int client_fd, const char *filepath, int chunk_size, const char *data) {
     int fd;
 
@@ -1092,103 +1254,8 @@ int handle_push(int client_fd, const char *filepath, int chunk_size, const char 
 
 
 
-
-
-void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_mutex) {
-    char *file_data = NULL;
-    int file_size = 0;
-
-    char timestamp[64];
-    time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-
-    pthread_t thread_pid = pthread_self();
-    char *source_no_ext = strip_extension(task.source_path);
-    char *target_no_ext = strip_extension(task.target_path);
-    int pull_errno = 0;
-    if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size, &pull_errno) == 0) {
-        pthread_mutex_lock(log_mutex);    
-        fprintf(logfile,
-            "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PULL] [SUCCESS] [%d bytes pulled]\n",
-            timestamp,
-            source_no_ext, task.source_host, task.source_port,
-            target_no_ext, task.target_host, task.target_port,
-            (long)thread_pid, file_size
-        );
-        fflush(logfile);
-        pthread_mutex_unlock(log_mutex);
-
-        int push_errno = 0;
-        if (push_file(task.target_host, task.target_port, task.target_path, file_data, file_size, &push_errno) == 0) {
-            now = time(NULL);
-            tm_info = localtime(&now);
-            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-
-            pthread_mutex_lock(log_mutex);
-            fprintf(logfile,
-                "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PUSH] [SUCCESS] [%d bytes pushed]\n",
-                timestamp,
-                source_no_ext, task.source_host, task.source_port,
-                target_no_ext, task.target_host, task.target_port,
-                (long)thread_pid, file_size
-            );
-            fflush(logfile);
-            pthread_mutex_unlock(log_mutex);
-        } else {
-            const char *filename = strrchr(task.target_path, '/');
-            filename = filename ? filename + 1 : task.target_path;
-
-            now = time(NULL);
-            tm_info = localtime(&now);
-            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-
-            pthread_mutex_lock(log_mutex);
-            fprintf(logfile,
-                "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PUSH] [ERROR] [File: %s - %s]\n",
-                timestamp,
-                source_no_ext, task.source_host, task.source_port,
-                target_no_ext, task.target_host, task.target_port,
-                (long)thread_pid, filename, strerror(push_errno)
-            );
-            fflush(logfile);
-            pthread_mutex_unlock(log_mutex);
-        }
-
-        free(file_data);
-    } else {
-        const char *filename = strrchr(task.source_path, '/');
-        filename = filename ? filename + 1 : task.source_path;
-
-        pthread_mutex_lock(log_mutex);
-        fprintf(logfile,
-            "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PULL] [ERROR] [File: %s - %s]\n",
-            timestamp,
-            source_no_ext, task.source_host, task.source_port,
-            target_no_ext, task.target_host, task.target_port,
-            (long)thread_pid, filename, strerror(pull_errno)
-        );
-        fflush(logfile);
-        pthread_mutex_unlock(log_mutex);
-    }
-}
-
-
-char *strip_extension(const char *path) {
-    char *path_copy = strdup(path);  
-    if (!path_copy) return NULL;
-
-    char *basename = strrchr(path_copy, '/');
-    basename = basename ? basename + 1 : path_copy;
-
-    char *dot = strrchr(basename, '.');
-    if (dot) {
-        *dot = '\0';  
-    }
-
-    return path_copy;
-}
-
+/*--------------------------------------------   ΚΟΙΝΗ ΣΥΝΑΡΤΗΣΗ  -----------------------------------------------*/
+//συνάρτηση απαλοιφής αρχικού / για relative path
 const char* strip_leading_slash(const char* path) {
     if (path[0] == '/')
         return path + 1;

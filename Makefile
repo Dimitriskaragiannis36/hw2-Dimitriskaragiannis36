@@ -7,7 +7,7 @@ CFLAGS = -Wall -g
 #make βασικός στόχος
 all: nfs_manager nfs_console nfs_client
 
-#manager με link στο utils
+#manager με link στο utils και χρήση threads
 nfs_manager: nfs_manager.c utils.c 
 	$(CC) $(CFLAGS) -o nfs_manager nfs_manager.c utils.c -lpthread
 
@@ -15,7 +15,7 @@ nfs_manager: nfs_manager.c utils.c
 nfs_console: nfs_console.c utils.c
 	$(CC) $(CFLAGS) -o nfs_console nfs_console.c utils.c
 
-#client με link στο utils
+#client με link στο utils και χρήση threads
 nfs_client: nfs_client.c utils.c
 	$(CC) $(CFLAGS) -o nfs_client nfs_client.c utils.c -lpthread
 
