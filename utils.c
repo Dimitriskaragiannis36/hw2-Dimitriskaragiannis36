@@ -12,6 +12,8 @@
 #include <errno.h> //για errno, EINTR
 #include <sys/stat.h>  //για stat
 
+#define CHUNK_SIZE 1024
+
 FILE *global_log_fp = NULL; //αρχικοποίηση global pointer του manager_logfile
 pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER; //αρχικοποίηση mytex
 
@@ -602,7 +604,7 @@ int pull_file(const char *host, int port, const char *filepath,
         if (out_errno) *out_errno = errno;
         return -1;
     }
-
+    //ρύθμιση διεύθυνσης server
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
@@ -740,89 +742,158 @@ int pull_file(const char *host, int port, const char *filepath,
 //συνάρτηση υλοποίησης PUSH
 int push_file(const char *host, int port, const char *filepath,
               const char *data, int size, int *out_errno) {
-    int sockfd;
-    struct sockaddr_in serv_addr;
-
     if (out_errno) *out_errno = 0;
 
-    //δημιουργία socket TCP
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        if (out_errno) *out_errno = errno;
-        return -1;
-    }
-
-    //προετοιμασία διεύθυνσης του server
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
-        int err = errno;
-        close(sockfd);
-        if (out_errno) *out_errno = err;
-        return -1;
-    }
-
-    //σύνδεση
-    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        int err = errno;
-        close(sockfd);
-        if (out_errno) *out_errno = err;
-        return -1;
-    }
-
-    //αποστολή εντολής PUSH
-    char header[1024];
-    int header_len = snprintf(header, sizeof(header), "PUSH %s %d ", filepath, size);
-    if (header_len < 0 || header_len >= (int)sizeof(header)) {
-        close(sockfd);
-        if (out_errno) *out_errno = EINVAL;
-        return -1;
-    }
-
-    //πακέτο προς αποστολή:  header + δεδομένα αρχείου
-    char *packet = malloc(header_len + size);
-    if (!packet) {
-        close(sockfd);
-        if (out_errno) *out_errno = ENOMEM;
-        return -1;
-    }
-
-    memcpy(packet, header, header_len);
-    memcpy(packet + header_len, data, size);
-
-    //αποστολή πακέτου
-    int total_sent = 0;
-    while (total_sent < header_len + size) {
-        int n = send(sockfd, packet + total_sent, header_len + size - total_sent, 0);
-        if (n <= 0) {
-            int err = (n == 0) ? ECONNRESET : errno;
-            free(packet);
+    //περίπτωση truncate ή EOF: απλό PUSH -1 ή PUSH 0
+    if (size <= 0) {
+        int sockfd;
+        struct sockaddr_in serv_addr;
+        //δημιουργία socket
+        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0) {
+            if (out_errno) *out_errno = errno;
+            return -1;
+        }
+        //ρύθμιση διεύθυνσης server
+        memset(&serv_addr, 0, sizeof(serv_addr));
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_port = htons(port);
+        if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
+            int err = errno;
             close(sockfd);
             if (out_errno) *out_errno = err;
             return -1;
         }
-        total_sent += n;
-    }
+        //σύνδεση
+        if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+            int err = errno;
+            close(sockfd);
+            if (out_errno) *out_errno = err;
+            return -1;
+        }
+        //προετοιμασία header
+        char header[1024];
+        int header_len = snprintf(header, sizeof(header), "PUSH %s %d ", filepath, size);
+        if (header_len < 0 || header_len >= (int)sizeof(header)) {
+            close(sockfd);
+            if (out_errno) *out_errno = EINVAL;
+            return -1;
+        }
 
-    free(packet);
+        // στέλνουμε μόνο το header
+        int total_sent = 0;
+        while (total_sent < header_len) {
+            int n = send(sockfd, header + total_sent, header_len - total_sent, 0);
+            if (n <= 0) {
+                int err = (n == 0) ? ECONNRESET : errno;
+                close(sockfd);
+                if (out_errno) *out_errno = err;
+                return -1;
+            }
+            total_sent += n;
+        }
 
-    //λήψη αποτελέσματος από server (int σε network byte order)
-    int result_net;
-    if (recv(sockfd, &result_net, sizeof(int), 0) != sizeof(int)) {
-        int err = errno;
+        // λαμβάνουμε απάντηση
+        int result_net;
+        if (recv(sockfd, &result_net, sizeof(int), 0) != sizeof(int)) {
+            int err = errno;
+            close(sockfd);
+            if (out_errno) *out_errno = err;
+            return -1;
+        }
+        //κλείσιμο socket
         close(sockfd);
-        if (out_errno) *out_errno = err;
-        return -1;
+        int result = ntohl(result_net);
+        if (result & 0x80000000) {
+            if (out_errno) *out_errno = result & 0x7FFFFFFF;
+            return -1;
+        }
+        return 0;
     }
 
-    close(sockfd);
+    //περίπτωση κανονικής αποστολής αρχείου σε chunks
+    int offset = 0;
+    while (offset < size) {
+        int chunk_size = (size - offset > CHUNK_SIZE) ? CHUNK_SIZE : size - offset;
+        
+        int sockfd;
+        struct sockaddr_in serv_addr;
+        //δημιουργία socket
+        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0) {
+            if (out_errno) *out_errno = errno;
+            return -1;
+        }
+        //ρύθμιση διεύθυνσης server
+        memset(&serv_addr, 0, sizeof(serv_addr));
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_port = htons(port);
+        if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
+            int err = errno;
+            close(sockfd);
+            if (out_errno) *out_errno = err;
+            return -1;
+        }
+        //σύνδεση
+        if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+            int err = errno;
+            close(sockfd);
+            if (out_errno) *out_errno = err;
+            return -1;
+        }
 
-    //μετατροπή σε host byte order και έλεγχος σφάλματος
-    int result = ntohl(result_net);
-    if (result & 0x80000000) {
-        if (out_errno) *out_errno = result & 0x7FFFFFFF;
-        return -1;
+        //προετοιμασία header για το chunk
+        char header[1024];
+        int header_len = snprintf(header, sizeof(header), "PUSH %s %d ", filepath, chunk_size);
+        if (header_len < 0 || header_len >= (int)sizeof(header)) {
+            close(sockfd);
+            if (out_errno) *out_errno = EINVAL;
+            return -1;
+        }
+
+        //αποστολή header
+        int total_sent = 0;
+        while (total_sent < header_len) {
+            int n = send(sockfd, header + total_sent, header_len - total_sent, 0);
+            if (n <= 0) {
+                int err = (n == 0) ? ECONNRESET : errno;
+                close(sockfd);
+                if (out_errno) *out_errno = err;
+                return -1;
+            }
+            total_sent += n;
+        }
+
+        //αποστολή δεδομένων chunk
+        total_sent = 0;
+        while (total_sent < chunk_size) {
+            int n = send(sockfd, data + offset + total_sent, chunk_size - total_sent, 0);
+            if (n <= 0) {
+                int err = (n == 0) ? ECONNRESET : errno;
+                close(sockfd);
+                if (out_errno) *out_errno = err;
+                return -1;
+            }
+            total_sent += n;
+        }
+
+        //λήψη απάντησης
+        int result_net;
+        if (recv(sockfd, &result_net, sizeof(int), 0) != sizeof(int)) {
+            int err = errno;
+            close(sockfd);
+            if (out_errno) *out_errno = err;
+            return -1;
+        }
+
+        close(sockfd);
+        int result = ntohl(result_net);
+        if (result & 0x80000000) {
+            if (out_errno) *out_errno = result & 0x7FFFFFFF;
+            return -1;
+        }
+
+        offset += chunk_size;
     }
 
     return 0;
@@ -1285,7 +1356,7 @@ int handle_push(int client_fd, const char *filepath, int chunk_size, const char 
     }
 
     //γράφω με append
-    fd = open(filepath, O_WRONLY | O_APPEND, 0644);
+    fd = open(filepath, O_WRONLY | O_APPEND | O_CREAT, 0644);
     if (fd == -1) {
         int err = htonl(0x80000000 | errno);
         send(client_fd, &err, sizeof(int), 0);
