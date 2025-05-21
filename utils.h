@@ -116,11 +116,11 @@ void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_m
 
 //συνάρτηση υλοποίησης PULL
 int pull_file(const char *host, int port, const char *filepath,
-              char **out_data, int *out_size, int *out_errno);
+                      int *out_fd, int *out_size, int *out_errno);
 
 //συνάρτηση υλοποίησης PUSH
 int push_file(const char *host, int port, const char *filepath,
-              const char *data, int size, int *out_errno);
+                      int fd, int size, int *out_errno);
 
 //συνάρτηση αρχικοποίησης ουράς εργασιών
 void init_task_queue(task_queue *q, int capacity);

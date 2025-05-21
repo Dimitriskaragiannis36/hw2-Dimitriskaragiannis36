@@ -223,6 +223,8 @@ int handle_command(int client_sock, FILE *logfile, sync_info_mem_store *store, p
                                         line[sizeof(line) - 2] = '\n';  
                                         line[sizeof(line) - 1] = '\0';  
                                     }
+                                    fputs(line, stdout);
+                                    fflush(stdout);
                                     strncat(response, line, sizeof(response) - strlen(response) - 1);
                                     
                                     //δημιουργία και επεξεργασία του sync task
@@ -501,81 +503,27 @@ int connect_to_client(const char *ip, int port) {
 
 //συνάρτηση εργασιών συγχρονισμού
 void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_mutex) {
-    char *file_data = NULL;
-    int file_size = 0;
 
-    //χρονική σήμανση για log
+    // χρονική σήμανση για log
     char timestamp[64];
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
 
-    //παίρνω το pthread id
     pthread_t thread_pid = pthread_self();
-
-    //αφαιρώ τις καταλήξεις
-    char *source_no_ext = strip_extension(task.source_path);
+    //αφαίρεση της επέκτασης από το source και target path
+    char *source_no_ext = strip_extension(task.source_path); 
     char *target_no_ext = strip_extension(task.target_path);
-    int pull_errno = 0;
-
-    //εκτέλεση PULL εντολής
-    if (pull_file(task.source_host, task.source_port, task.source_path, &file_data, &file_size, &pull_errno) == 0) {
-        pthread_mutex_lock(log_mutex);  //κλειδώννω για καταγραφή  
-        fprintf(logfile,
-            "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PULL] [SUCCESS] [%d bytes pulled]\n",
-            timestamp,
-            source_no_ext, task.source_host, task.source_port,
-            target_no_ext, task.target_host, task.target_port,
-            (long)thread_pid, file_size
-        );
-        fflush(logfile);
-        pthread_mutex_unlock(log_mutex); //ξεκλειδώνω για καταγραφή
-
-        //εκτέλεση PUSH εντολής
-        int push_errno = 0;
-        if (push_file(task.target_host, task.target_port, task.target_path, file_data, file_size, &push_errno) == 0) {
-            now = time(NULL);
-            tm_info = localtime(&now);
-            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-
-            pthread_mutex_lock(log_mutex); //κλειδώννω για καταγραφή 
-            fprintf(logfile,
-                "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PUSH] [SUCCESS] [%d bytes pushed]\n",
-                timestamp,
-                source_no_ext, task.source_host, task.source_port,
-                target_no_ext, task.target_host, task.target_port,
-                (long)thread_pid, file_size
-            );
-            fflush(logfile);
-            pthread_mutex_unlock(log_mutex); //ξεκλειδώνω για καταγραφή
-        } else {
-            //αν αποτύχει το PUSH
-            const char *filename = strrchr(task.target_path, '/');
-            filename = filename ? filename + 1 : task.target_path;
-
-            now = time(NULL);
-            tm_info = localtime(&now);
-            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
-
-            pthread_mutex_lock(log_mutex); //κλειδώννω για καταγραφή
-            fprintf(logfile,
-                "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PUSH] [ERROR] [File: %s - %s]\n",
-                timestamp,
-                source_no_ext, task.source_host, task.source_port,
-                target_no_ext, task.target_host, task.target_port,
-                (long)thread_pid, filename, strerror(push_errno)
-            );
-            fflush(logfile);
-            pthread_mutex_unlock(log_mutex); //ξεκλειδώνω για καταγραφή
-        }
-
-        free(file_data);
-    } else {
-        //αν αποτύχει το PULL
+    int pull_errno = 0, push_errno = 0;
+    int tmp_fd = -1, file_size = 0;
+    //
+    if (pull_file(task.source_host, task.source_port, task.source_path,
+                      &tmp_fd, &file_size, &pull_errno) != 0) { 
+        //PULL failed
         const char *filename = strrchr(task.source_path, '/');
         filename = filename ? filename + 1 : task.source_path;
 
-        pthread_mutex_lock(log_mutex);  //κλειδώννω για καταγραφή
+        pthread_mutex_lock(log_mutex); //κλείδωμα mutex
         fprintf(logfile,
             "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PULL] [ERROR] [File: %s - %s]\n",
             timestamp,
@@ -584,47 +532,95 @@ void process_task_serially(sync_task task, FILE *logfile, pthread_mutex_t *log_m
             (long)thread_pid, filename, strerror(pull_errno)
         );
         fflush(logfile);
-        pthread_mutex_unlock(log_mutex);  //ξεκλειδώνω για καταγραφή
+        pthread_mutex_unlock(log_mutex); //ξεκλείδωμα mutex
+        return;
     }
+
+    //PULL success
+    pthread_mutex_lock(log_mutex); //κλείδωμα mutex
+    fprintf(logfile,
+        "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PULL] [SUCCESS] [%d bytes pulled]\n",
+        timestamp,
+        source_no_ext, task.source_host, task.source_port,
+        target_no_ext, task.target_host, task.target_port,
+        (long)thread_pid, file_size
+    );
+    fflush(logfile);
+    pthread_mutex_unlock(log_mutex); //ξεκλείδωμα mutex
+    //PUSH success
+    if (push_file(task.target_host, task.target_port,
+                          task.target_path, tmp_fd, file_size, &push_errno) == 0) {
+        now = time(NULL);
+        tm_info = localtime(&now);
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
+        pthread_mutex_lock(log_mutex); //κλείδωμα mutex
+        fprintf(logfile,
+            "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PUSH] [SUCCESS] [%d bytes pushed]\n",
+            timestamp,
+            source_no_ext, task.source_host, task.source_port,
+            target_no_ext, task.target_host, task.target_port,
+            (long)thread_pid, file_size
+        );
+        fflush(logfile);
+        pthread_mutex_unlock(log_mutex); //ξεκλείδωμα mutex
+    } else { //PUSH failed
+        const char *filename = strrchr(task.target_path, '/');
+        filename = filename ? filename + 1 : task.target_path;
+
+        now = time(NULL);
+        tm_info = localtime(&now);
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
+        pthread_mutex_lock(log_mutex); //κλείδωμα mutex
+        fprintf(logfile,
+            "[%s] [%s@%s:%d] [%s@%s:%d] [%ld] [PUSH] [ERROR] [File: %s - %s]\n",
+            timestamp,
+            source_no_ext, task.source_host, task.source_port,
+            target_no_ext, task.target_host, task.target_port,
+            (long)thread_pid, filename, strerror(push_errno)
+        );
+        fflush(logfile);
+        pthread_mutex_unlock(log_mutex); //ξεκλείδωμα mutex
+    }
+
+    close(tmp_fd);
 }
 
 //συνάρτηση υλοποίησης PULL
 int pull_file(const char *host, int port, const char *filepath,
-              char **out_data, int *out_size, int *out_errno) {
-    int sockfd;
-    struct sockaddr_in serv_addr;
-
-    *out_data = NULL;
-    *out_size = 0;
+                      int *out_fd, int *out_size, int *out_errno) {
+    int sockfd = -1;
+    int fd = -1;
+    //αρχικοποίηση των παραμέτρων εξόδου
+    if (out_fd) *out_fd = -1;
+    if (out_size) *out_size = 0;
     if (out_errno) *out_errno = 0;
-
-    //δημιουργία socket και σύνδεση
+    
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    //δημιουργία socket
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         if (out_errno) *out_errno = errno;
         return -1;
     }
     //ρύθμιση διεύθυνσης server
-    memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
-
     if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
-        int err = errno;
+        if (out_errno) *out_errno = errno;
         close(sockfd);
-        if (out_errno) *out_errno = err;
         return -1;
     }
-
-    //σύνδεση
+    //σύνδεση στο socket
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        int err = errno;
+        if (out_errno) *out_errno = errno;
         close(sockfd);
-        if (out_errno) *out_errno = err;
         return -1;
     }
 
-    //αποστολή εντολής PULL
+    //στείλε την εντολή PULL
     char msg[1024];
     int msg_len = snprintf(msg, sizeof(msg), "PULL %s\n", filepath);
     if (msg_len < 0 || msg_len >= (int)sizeof(msg)) {
@@ -632,21 +628,20 @@ int pull_file(const char *host, int port, const char *filepath,
         close(sockfd);
         return -1;
     }
-
+    //στέλνει το μήνυμα
     if (write(sockfd, msg, msg_len) != msg_len) {
         if (out_errno) *out_errno = errno;
         close(sockfd);
         return -1;
     }
 
-    //ανάγνωση αρχείου
-    char header[64];  
+    //διάβασε το header
+    char header[64];
     int header_pos = 0;
     char c;
-
     while (header_pos < (int)sizeof(header) - 1) {
         int n = recv(sockfd, &c, 1, 0);
-        if (n <= 0) {       //αν κλείσει
+        if (n <= 0) {
             if (out_errno) *out_errno = (n == 0 ? ECONNRESET : errno);
             close(sockfd);
             return -1;
@@ -654,246 +649,162 @@ int pull_file(const char *host, int port, const char *filepath,
         if (c == ' ') break;
         header[header_pos++] = c;
     }
-
     header[header_pos] = '\0';
+    //έλεγχος αν το header είναι έγκυρο
     int filesize = atoi(header);
-
-    if (filesize == -1) { //αν μέγεθος -1 σφάλμα
-
-        char *errbuf = malloc(1024);
-        if (!errbuf) {
-            if (out_errno) *out_errno = ENOMEM;
-            close(sockfd);
-            return -1;
-        }
-
-        int capacity = 1024;
-        int len = 0;
-        while (1) {
-            int n = recv(sockfd, errbuf + len, capacity - len, 0);
-            if (n <= 0) break;  
-            len += n;
-            if (len == capacity) {
-                char *newbuf = realloc(errbuf, capacity * 2);
-                if (!newbuf) {
-                    free(errbuf);
-                    if (out_errno) *out_errno = ENOMEM;
-                    close(sockfd);
-                    return -1;
-                }
-                errbuf = newbuf;
-                capacity *= 2;
-            }
-        }
-
-        errbuf[len] = '\0';
-        fprintf(stderr, "Server error: %s\n", errbuf);
-        
-        //μετατροπή μηνύματος σε κωδικό errno
-        if (out_errno) {
-            if (strstr(errbuf, "Permission denied")) *out_errno = EACCES;
-            else if (strstr(errbuf, "No such file or directory")) *out_errno = ENOENT;
-            else if (strstr(errbuf, "Is a directory")) *out_errno = EISDIR;
-            else if (strstr(errbuf, "Not a directory")) *out_errno = ENOTDIR;
-            else if (strstr(errbuf, "Bad file descriptor")) *out_errno = EBADF;
-            else if (strstr(errbuf, "Invalid argument")) *out_errno = EINVAL;
-            else if (strstr(errbuf, "File exists")) *out_errno = EEXIST;
-            else *out_errno = EIO;  
-        }
-
-        free(errbuf);
-        close(sockfd);
-        return -1;
-    }
-
     if (filesize <= 0) {
         if (out_errno) *out_errno = EIO;
         close(sockfd);
         return -1;
     }
 
-    //ανάγνωση των δεδομένων του αρχείου
-    char *data = malloc(filesize);
-    if (!data) {
-        if (out_errno) *out_errno = ENOMEM;
+    //δημιουργία προσωρινού αρχείου
+    char tmp_path[] = "/tmp/nfs_pull_XXXXXX"; //το XXXXXX θα αντικατασταθεί
+    fd = mkstemp(tmp_path);
+    if (fd < 0) {
+        if (out_errno) *out_errno = errno;
         close(sockfd);
         return -1;
     }
+    unlink(tmp_path);  //να διαγραφεί μόλις κλείσει
 
-    int total_received = 0;
-    while (total_received < filesize) {
-        int n = recv(sockfd, data + total_received, filesize - total_received, 0);
+    //λήψη δεδομένων και εγγραφή στο αρχείο
+    char buf[4096];
+    int total = 0;
+    while (total < filesize) {
+        int to_read = (filesize - total > (int)sizeof(buf)) ? sizeof(buf) : filesize - total;
+        int n = recv(sockfd, buf, to_read, 0);
         if (n <= 0) {
-            int err = (n == 0) ? ECONNRESET : errno;
-            free(data);
+            if (out_errno) *out_errno = (n == 0 ? ECONNRESET : errno);
             close(sockfd);
-            if (out_errno) *out_errno = err;
+            close(fd);
             return -1;
         }
-        total_received += n;
+        
+        int written = 0;
+        while (written < n) { //στέλνει το buffer στο αρχείο
+            int m = write(fd, buf + written, n - written);
+            if (m <= 0) {
+                if (out_errno) *out_errno = errno;
+                close(sockfd);
+                close(fd);
+                return -1;
+            }
+            written += m;
+        }
+
+        total += n;
+    }
+    //θέτει το offset στο αρχείο
+    if (lseek(fd, 0, SEEK_SET) < 0) { 
+        if (out_errno) *out_errno = errno;
+        close(sockfd);
+        close(fd);
+        return -1;
     }
 
-    *out_data = data;
-    *out_size = filesize;
+    //επιτυχία
+    if (out_fd) *out_fd = fd;
+    if (out_size) *out_size = filesize;
     close(sockfd);
     return 0;
 }
 
 //συνάρτηση υλοποίησης PUSH
 int push_file(const char *host, int port, const char *filepath,
-              const char *data, int size, int *out_errno) {
+                      int fd, int size, int *out_errno) {
     if (out_errno) *out_errno = 0;
 
-    //περίπτωση truncate ή EOF: απλό PUSH -1 ή PUSH 0
-    if (size <= 0) {
-        int sockfd;
-        struct sockaddr_in serv_addr;
-        //δημιουργία socket
-        sockfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (sockfd < 0) {
-            if (out_errno) *out_errno = errno;
-            return -1;
-        }
-        //ρύθμιση διεύθυνσης server
-        memset(&serv_addr, 0, sizeof(serv_addr));
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_port = htons(port);
-        if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
-            int err = errno;
-            close(sockfd);
-            if (out_errno) *out_errno = err;
-            return -1;
-        }
-        //σύνδεση
-        if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-            int err = errno;
-            close(sockfd);
-            if (out_errno) *out_errno = err;
-            return -1;
-        }
-        //προετοιμασία header
-        char header[1024];
-        int header_len = snprintf(header, sizeof(header), "PUSH %s %d ", filepath, size);
-        if (header_len < 0 || header_len >= (int)sizeof(header)) {
-            close(sockfd);
-            if (out_errno) *out_errno = EINVAL;
-            return -1;
-        }
-
-        // στέλνουμε μόνο το header
-        int total_sent = 0;
-        while (total_sent < header_len) {
-            int n = send(sockfd, header + total_sent, header_len - total_sent, 0);
-            if (n <= 0) {
-                int err = (n == 0) ? ECONNRESET : errno;
-                close(sockfd);
-                if (out_errno) *out_errno = err;
-                return -1;
-            }
-            total_sent += n;
-        }
-
-        // λαμβάνουμε απάντηση
-        int result_net;
-        if (recv(sockfd, &result_net, sizeof(int), 0) != sizeof(int)) {
-            int err = errno;
-            close(sockfd);
-            if (out_errno) *out_errno = err;
-            return -1;
-        }
-        //κλείσιμο socket
+    //δημιουργία socket
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        if (out_errno) *out_errno = errno;
+        return -1;
+    }
+    //ρύθμιση διεύθυνσης server
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
+        int err = errno;
         close(sockfd);
-        int result = ntohl(result_net);
-        if (result & 0x80000000) {
-            if (out_errno) *out_errno = result & 0x7FFFFFFF;
-            return -1;
-        }
-        return 0;
+        if (out_errno) *out_errno = err;
+        return -1;
+    }
+    //σύνδεση στο socket
+    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        int err = errno;
+        close(sockfd);
+        if (out_errno) *out_errno = err;
+        return -1;
     }
 
-    //περίπτωση κανονικής αποστολής αρχείου σε chunks
-    int offset = 0;
-    while (offset < size) {
-        int chunk_size = (size - offset > CHUNK_SIZE) ? CHUNK_SIZE : size - offset;
-        
-        int sockfd;
-        struct sockaddr_in serv_addr;
-        //δημιουργία socket
-        sockfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (sockfd < 0) {
-            if (out_errno) *out_errno = errno;
-            return -1;
-        }
-        //ρύθμιση διεύθυνσης server
-        memset(&serv_addr, 0, sizeof(serv_addr));
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_port = htons(port);
-        if (inet_pton(AF_INET, host, &serv_addr.sin_addr) <= 0) {
-            int err = errno;
-            close(sockfd);
-            if (out_errno) *out_errno = err;
-            return -1;
-        }
-        //σύνδεση
-        if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-            int err = errno;
-            close(sockfd);
-            if (out_errno) *out_errno = err;
-            return -1;
-        }
-
-        //προετοιμασία header για το chunk
-        char header[1024];
-        int header_len = snprintf(header, sizeof(header), "PUSH %s %d ", filepath, chunk_size);
-        if (header_len < 0 || header_len >= (int)sizeof(header)) {
-            close(sockfd);
-            if (out_errno) *out_errno = EINVAL;
-            return -1;
-        }
-
-        //αποστολή header
-        int total_sent = 0;
-        while (total_sent < header_len) {
-            int n = send(sockfd, header + total_sent, header_len - total_sent, 0);
-            if (n <= 0) {
-                int err = (n == 0) ? ECONNRESET : errno;
-                close(sockfd);
-                if (out_errno) *out_errno = err;
-                return -1;
-            }
-            total_sent += n;
-        }
-
-        //αποστολή δεδομένων chunk
-        total_sent = 0;
-        while (total_sent < chunk_size) {
-            int n = send(sockfd, data + offset + total_sent, chunk_size - total_sent, 0);
-            if (n <= 0) {
-                int err = (n == 0) ? ECONNRESET : errno;
-                close(sockfd);
-                if (out_errno) *out_errno = err;
-                return -1;
-            }
-            total_sent += n;
-        }
-
-        //λήψη απάντησης
-        int result_net;
-        if (recv(sockfd, &result_net, sizeof(int), 0) != sizeof(int)) {
-            int err = errno;
-            close(sockfd);
-            if (out_errno) *out_errno = err;
-            return -1;
-        }
-
+    //αποστολή εντολής PUSH
+    char header[1024];
+    int header_len = snprintf(header, sizeof(header), "PUSH %s %d ", filepath, size);
+    if (header_len < 0 || header_len >= (int)sizeof(header)) {
         close(sockfd);
-        int result = ntohl(result_net);
-        if (result & 0x80000000) {
-            if (out_errno) *out_errno = result & 0x7FFFFFFF;
+        if (out_errno) *out_errno = EINVAL;
+        return -1;
+    }
+    //στέλνουμε το header
+    int total_sent = 0;
+    while (total_sent < header_len) {
+        int n = send(sockfd, header + total_sent, header_len - total_sent, 0);
+        if (n <= 0) {
+            int err = (n == 0) ? ECONNRESET : errno;
+            close(sockfd);
+            if (out_errno) *out_errno = err;
             return -1;
         }
+        total_sent += n;
+    }
 
-        offset += chunk_size;
+    //αποστολή αρχείου σε chunks
+    char buffer[CHUNK_SIZE];
+    int remaining = size;
+
+    while (remaining > 0) {
+        int to_read = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
+        ssize_t nread = read(fd, buffer, to_read);
+        if (nread < 0) {
+            int err = errno;
+            close(sockfd);
+            if (out_errno) *out_errno = err;
+            return -1;
+        }
+        if (nread == 0) break; //EOF
+
+        int sent = 0;
+        while (sent < nread) {
+            int n = send(sockfd, buffer + sent, nread - sent, 0);
+            if (n <= 0) {
+                int err = (n == 0) ? ECONNRESET : errno;
+                close(sockfd);
+                if (out_errno) *out_errno = err;
+                return -1;
+            }
+            sent += n;
+        }
+
+        remaining -= nread;
+    }
+
+    //λήψη απάντησης από server
+    int result_net;
+    if (recv(sockfd, &result_net, sizeof(int), 0) != sizeof(int)) {
+        int err = errno;
+        close(sockfd);
+        if (out_errno) *out_errno = err;
+        return -1;
+    }
+    //μετατροπή από network byte order σε host byte order
+    close(sockfd);
+    int result = ntohl(result_net);
+    if (result & 0x80000000) {
+        if (out_errno) *out_errno = result & 0x7FFFFFFF;
+        return -1;
     }
 
     return 0;
